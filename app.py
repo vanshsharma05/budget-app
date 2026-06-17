@@ -5,126 +5,165 @@ from urllib.parse import urlparse
 import re
 
 # -----------------------------------------------------------------------------
-# 1. PROFESSIONAL UI CONFIGURATION
+# 1. LUXURY UI CONFIGURATION & CUSTOM CSS
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Smart Budget Shopper", page_icon="🛍️", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Curated Wishlist", page_icon="✨", layout="wide", initial_sidebar_state="expanded")
+
+# Inject Custom CSS for an elegant, feminine, editorial aesthetic
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Outfit:wght@300;400;500&display=swap');
+    
+    /* Global Font Settings */
+    html, body, [class*="css"] {
+        font-family: 'Outfit', sans-serif;
+        color: #5A4A42; 
+    }
+    
+    /* Elegant Serif Headers */
+    h1, h2, h3 {
+        font-family: 'Playfair Display', serif !important;
+        color: #3B2F2F !important;
+        font-weight: 500;
+        letter-spacing: 0.5px;
+    }
+    
+    /* Soft Blush Backgrounds */
+    .stApp {
+        background-color: #FFF9FA;
+    }
+    
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background-color: #FDF5F6;
+        border-right: 1px solid #F5E6E8;
+    }
+    
+    /* Chic Buttons */
+    div.stButton > button:first-child {
+        background-color: #E8C1C5;
+        color: white;
+        border: none;
+        border-radius: 30px;
+        padding: 10px 24px;
+        font-weight: 500;
+        letter-spacing: 1px;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:first-child:hover {
+        background-color: #DDA7B0;
+        color: white;
+        box-shadow: 0 4px 12px rgba(221, 167, 176, 0.4);
+    }
+    
+    /* Metric Cards */
+    div[data-testid="metric-container"] {
+        background-color: white;
+        border: 1px solid #F5E6E8;
+        border-radius: 15px;
+        padding: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.02);
+    }
+    
+    /* Product Cards */
+    div[data-testid="stVerticalBlock"] div[style*="border"] {
+        border: 1px solid #F5E6E8 !important;
+        border-radius: 15px !important;
+        background-color: white;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.01);
+    }
+    
+    /* Input Fields */
+    .stTextInput>div>div>input, .stNumberInput>div>div>input {
+        border-radius: 10px;
+        border: 1px solid #EAD8DB;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Initialize session state memory
 if "shopping_list" not in st.session_state:
     st.session_state.shopping_list = []
 if "total_budget" not in st.session_state:
-    st.session_state.total_budget = 50000.0  # Default 50k INR
+    st.session_state.total_budget = 100000.0  # Default 1 Lakh INR
 
 # -----------------------------------------------------------------------------
-# 2. UPGRADED STEALTH SCRAPER (INDIAN E-COMMERCE FOCUS)
+# 2. STEALTH SCRAPER (WITH GRACEFUL FALLBACK)
 # -----------------------------------------------------------------------------
 def extract_product_details(url):
-    """Upgraded scraper with stealth headers to bypass basic bot protection."""
+    """Attempts to scrape, but fails gracefully for high-security sites."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Referer": "https://www.google.com/"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+        "Accept-Language": "en-US,en;q=0.9"
     }
-    
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code != 200:
             return None, None
             
         soup = BeautifulSoup(response.content, "html.parser")
         
-        # 1. Fetch Title
-        title = "Unknown Product"
-        title_tags = [
-            soup.find("span", {"id": "productTitle"}), # Amazon
-            soup.find("span", class_="B_NuCI"), # Old Flipkart
-            soup.find("span", class_="VU-ZEz"), # New Flipkart
-            soup.find("h1", class_="pdp-title"), # Myntra
-            soup.find("h1") # Generic
-        ]
-        for tag in title_tags:
-            if tag:
-                title = tag.get_text().strip()
-                break
+        # Generic Title Fetching
+        title = soup.find("h1")
+        title_text = title.get_text().strip() if title else "Couture Item"
                 
-        # 2. Fetch Price (INR Focus)
+        # Generic Price Fetching
         price = None
-        price_tags = [
-            soup.find("span", class_="a-price-whole"), # Amazon
-            soup.find("div", class_="_30jeq3 _16Jk6d"), # Old Flipkart
-            soup.find("div", class_="Nx9bqj CxhGGd"), # New Flipkart
-            soup.find("span", class_="pdp-price"), # Myntra
-            soup.find("span", class_="price") # Generic
-        ]
-        
+        price_tags = soup.find_all(text=re.compile(r'₹|INR|Rs\.?'))
         for tag in price_tags:
-            if tag:
-                raw_price = tag.get_text().strip()
-                # Strip commas and ₹ signs, keep digits
-                cleaned_price = re.sub(r'[^\d.]', '', raw_price)
-                if cleaned_price:
-                    price = float(cleaned_price)
-                    break
+            cleaned = re.sub(r'[^\d.]', '', tag)
+            if cleaned:
+                price = float(cleaned)
+                break
                     
-        return title[:65] + "..." if len(title) > 65 else title, price
-        
+        return title_text[:65] + "..." if len(title_text) > 65 else title_text, price
     except Exception:
         return None, None
 
 # -----------------------------------------------------------------------------
-# 3. SIDEBAR: CONTROL PANEL
+# 3. SIDEBAR: WARDROBE PLANNER
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("⚙️ Control Panel")
+    st.markdown("## ✨ Atelier Controls")
     st.markdown("---")
     
-    # Budget Input
     st.session_state.total_budget = st.number_input(
-        "💰 Set Total Budget (₹)", 
+        "💎 Set Wardrobe Budget (₹)", 
         min_value=0.0, 
         value=float(st.session_state.total_budget), 
-        step=1000.0
+        step=5000.0
     )
     
     st.markdown("---")
-    st.subheader("➕ Add Product")
+    st.markdown("### 🤍 Add to Lookbook")
+    st.caption("High-end sites block automated tracking. Add your pieces manually for a flawless experience.")
     
     with st.form("add_product_form", clear_on_submit=True):
-        product_url = st.text_input("🔗 Paste Link Here (Amazon, Flipkart, etc.):")
-        
-        with st.expander("🛠️ Manual Override (If Link Fails)"):
-            st.info("E-commerce sites sometimes block automated fetching. Type it manually here if the link fails.")
-            manual_name = st.text_input("Product Name:")
-            manual_price = st.number_input("Price (₹):", min_value=0.0, step=100.0)
+        manual_name = st.text_input("Item Name (e.g., Quilted Leather Bag):")
+        manual_price = st.number_input("Price (₹):", min_value=0.0, step=1000.0)
+        product_url = st.text_input("🔗 Link to item (Optional):")
             
-        submitted = st.form_submit_button("Fetch & Add to Dashboard", use_container_width=True)
+        submitted = st.form_submit_button("Add to Collection", use_container_width=True)
         
         if submitted:
-            if product_url or manual_name:
-                with st.spinner("Fetching data from website..."):
-                    scraped_name, scraped_price = extract_product_details(product_url) if product_url else (None, None)
-                    
-                    final_name = manual_name if manual_name else (scraped_name if scraped_name else "Scraping Blocked - Please enter manually")
-                    final_price = manual_price if manual_price > 0 else (scraped_price if scraped_price else 0.0)
-                    
-                    domain = urlparse(product_url).netloc.replace("www.", "") if product_url else "Manual Entry"
-                    
-                    st.session_state.shopping_list.append({
-                        "name": final_name,
-                        "price": final_price,
-                        "url": product_url if product_url else "#",
-                        "source": domain
-                    })
-                    st.rerun()
+            if manual_name and manual_price > 0:
+                domain = urlparse(product_url).netloc.replace("www.", "") if product_url else "Curated Piece"
+                
+                st.session_state.shopping_list.append({
+                    "name": manual_name,
+                    "price": manual_price,
+                    "url": product_url if product_url else "#",
+                    "source": domain
+                })
+                st.rerun()
             else:
-                st.error("Please provide a URL or manual details.")
+                st.error("Please enter the item name and price.")
 
 # -----------------------------------------------------------------------------
-# 4. MAIN DASHBOARD: UI / UX
+# 4. MAIN DASHBOARD: THE LOOKBOOK
 # -----------------------------------------------------------------------------
-st.title("🛍️ Smart Budget Dashboard")
-st.markdown("Track your wishlist and manage your finances seamlessly.")
+st.markdown("<h1>Curated Wardrobe Wishlist</h1>", unsafe_allow_html=True)
+st.markdown("Plan your luxury purchases and track your investment pieces.")
 
 # Financial Calculations
 total_spent = sum(item["price"] for item in st.session_state.shopping_list)
@@ -132,17 +171,15 @@ remaining_budget = st.session_state.total_budget - total_spent
 
 # High-End Metric Cards
 m1, m2, m3 = st.columns(3)
-with m1:
-    st.info(f"**Total Budget**\n### ₹ {st.session_state.total_budget:,.2f}")
-with m2:
-    st.warning(f"**Total Cost**\n### ₹ {total_spent:,.2f}")
-with m3:
-    if remaining_budget >= 0:
-        st.success(f"**Remaining Balance**\n### ₹ {remaining_budget:,.2f}")
-    else:
-        st.error(f"**Over Budget By**\n### ₹ {abs(remaining_budget):,.2f}")
+m1.metric("Total Budget", f"₹ {st.session_state.total_budget:,.2f}")
+m2.metric("Allocated Funds", f"₹ {total_spent:,.2f}")
 
-st.markdown("---")
+if remaining_budget >= 0:
+    m3.metric("Available Balance", f"₹ {remaining_budget:,.2f}")
+else:
+    m3.metric("Over Budget", f"₹ {abs(remaining_budget):,.2f}")
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # 5. PRODUCT LIST & SUGGESTIONS
@@ -150,34 +187,34 @@ st.markdown("---")
 col_items, col_sugg = st.columns([2, 1])
 
 with col_items:
-    st.subheader("🛒 Your Shopping List")
+    st.markdown("### 🛍️ Your Collection")
     if not st.session_state.shopping_list:
-        st.caption("Your list is empty. Add items from the sidebar to begin!")
+        st.info("Your lookbook is currently empty. Begin curating from the sidebar!")
     else:
         for index, item in enumerate(st.session_state.shopping_list):
-            # Professional Card UI for each item
             with st.container(border=True):
                 r1, r2, r3 = st.columns([4, 2, 1])
                 with r1:
-                    st.markdown(f"**[{item['name']}]({item['url']})**")
-                    st.caption(f"Source: {item['source']}")
+                    if item['url'] != "#":
+                        st.markdown(f"**[{item['name']}]({item['url']})**")
+                    else:
+                        st.markdown(f"**{item['name']}**")
+                    st.caption(f"{item['source']}")
                 with r2:
-                    st.subheader(f"₹ {item['price']:,.2f}")
+                    st.markdown(f"### ₹{item['price']:,.2f}")
                 with r3:
-                    if st.button("🗑️ Remove", key=f"del_{index}"):
+                    if st.button("✕", key=f"del_{index}", help="Remove item"):
                         st.session_state.shopping_list.pop(index)
                         st.rerun()
 
 with col_sugg:
-    st.subheader("💡 Smart AI Insights")
+    st.markdown("### 💌 Stylist Notes")
     with st.container(border=True):
         if not st.session_state.shopping_list:
-            st.write("Awaiting data to provide insights...")
+            st.write("Add pieces to receive budgeting insights.")
         elif remaining_budget < 0:
-            excess = abs(remaining_budget)
-            st.error(f"**Action Required!** You are ₹{excess:,.2f} over budget.")
+            st.markdown(f"**Re-evaluate needed.** You are over your allowance by **₹{abs(remaining_budget):,.2f}**.")
             expensive_item = max(st.session_state.shopping_list, key=lambda x: x["price"])
-            st.markdown(f"📉 **Quick Fix:** Removing your most expensive item (**{expensive_item['name']}** at ₹{expensive_item['price']:,.2f}) will bring you back into the green.")
+            st.markdown(f"Consider pausing on the **{expensive_item['name']}** to balance your curation.")
         else:
-            st.success("✅ **Budget is Healthy!** You are well within your limits.")
-            st.markdown(f"You still have **₹{remaining_budget:,.2f}** available to allocate.")
+            st.markdown("✨ **Perfectly balanced.** Your current curation sits beautifully within your financial limits.")
