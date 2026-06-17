@@ -2,24 +2,10 @@ import streamlit as st
 import re
 import json
 import os
-import time
 from urllib.parse import urlparse, urljoin, quote_plus
 from bs4 import BeautifulSoup
 import requests
 
-def _get_cloudscraper():
-    try:
-        import cloudscraper
-        return cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False},
-            delay=3,
-        )
-    except ImportError:
-        return None
-
-# =============================================================================
-# 0. PAGE CONFIG
-# =============================================================================
 st.set_page_config(
     page_title="Luxury Shopping Calculator",
     page_icon="✦",
@@ -52,21 +38,17 @@ def save_data():
 # =============================================================================
 # 2. CURRENCY
 # =============================================================================
-RATES = {
-    "INR": 1.0, "USD": 86.0, "EUR": 93.0, "GBP": 109.0, "AED": 23.0,
-    "JPY": 0.57, "CNY": 12.0, "SGD": 64.0, "CAD": 62.0, "AUD": 56.0, "CHF": 98.0,
-}
-CUR_SYM = {"₹": "INR", "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+RATES = {"INR":1.0, "USD":86.0, "EUR":93.0, "GBP":109.0, "AED":23.0,
+         "JPY":0.57, "CNY":12.0, "SGD":64.0, "CAD":62.0, "AUD":56.0, "CHF":98.0}
+CUR_SYM = {"₹":"INR", "$":"USD", "€":"EUR", "£":"GBP", "¥":"JPY"}
 
 def fmt_inr(n):
     n = round(abs(n))
     s = str(n)
     if len(s) <= 3: return f"₹ {s}"
-    result = s[-3:]
-    s = s[:-3]
+    result = s[-3:]; s = s[:-3]
     while len(s) > 2:
-        result = s[-2:] + "," + result
-        s = s[:-2]
+        result = s[-2:] + "," + result; s = s[:-2]
     if s: result = s + "," + result
     return f"₹ {result}"
 
@@ -96,60 +78,61 @@ def detect_currency(text):
     return None
 
 # =============================================================================
-# 3. SCRAPER
+# 3. SCRAPER — fail fast, smart strategy per site
 # =============================================================================
-BRANDS_RE = r'Louis Vuitton|Gucci|Prada|Chanel|Dior|Herm[eè]s|Burberry|Versace|Fendi|Balenciaga|Bottega Veneta|Cartier|Tiffany|Jimmy Choo|Christian Louboutin|Saint Laurent|YSL|Celine|Valentino|Givenchy|Bvlgari|Tom Ford|Moncler|Official'
+BRANDS_RE = r'Louis Vuitton|Gucci|Prada|Chanel|Dior|Herm[eè]s|Burberry|Versace|Fendi|Balenciaga|Bottega Veneta|Cartier|Tiffany|Jimmy Choo|Christian Louboutin|Saint Laurent|YSL|Celine|Valentino|Givenchy|Bvlgari|Tom Ford|Moncler|TataCLiQ|Tata CLiQ|Myntra|Ajio|Nykaa|Official'
 
-# ── ScraperAPI integration ──
+# Sites that need premium + JS rendering (heavy bot protection)
+AKAMAI_SITES = ["louisvuitton.com", "chanel.com", "hermes.com", "dior.com",
+                "gucci.com", "prada.com", "bottegaveneta.com", "ysl.com",
+                "burberry.com", "valentino.com", "saintlaurent.com"]
+# Indian sites that need render but not premium
+INDIAN_RENDER_SITES = ["tatacliq.com", "myntra.com", "ajio.com", "nykaa.com",
+                       "tatacliqluxury.com", "ajiomania.com"]
+
+
 def _get_scraper_api_key():
-    """Read ScraperAPI key from env var or Streamlit secrets."""
     key = os.environ.get("SCRAPER_API_KEY", "").strip()
     if not key:
-        try:
-            key = st.secrets.get("SCRAPER_API_KEY", "").strip()
-        except Exception:
-            pass
+        try: key = st.secrets.get("SCRAPER_API_KEY", "").strip()
+        except Exception: pass
     return key if key else None
 
 
-def _try_scraperapi(url, progress_cb=None):
-    """
-    Use ScraperAPI residential proxies + JS rendering.
-    Returns (html_string, status_code) or (None, error_msg).
-    """
+def _classify_site(url):
+    """Return ('premium'|'render'|'simple', country_code)."""
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    if any(s in domain for s in AKAMAI_SITES):
+        return ("premium", "in" if ".in" in domain else "us")
+    if any(s in domain for s in INDIAN_RENDER_SITES):
+        return ("render", "in")
+    if ".in" in domain or domain.endswith(".in"):
+        return ("simple", "in")
+    return ("simple", "us")
+
+
+def _try_scraperapi(url, mode, country, timeout=45):
+    """Returns (html, status). Status is 'ok', 'invalid_key', 'no_credits', 'rate_limited', or error string."""
     api_key = _get_scraper_api_key()
-    if not api_key:
-        return None, "no_key"
-
-    domain = urlparse(url).netloc.lower()
-    # India-based LV/Indian sites get Indian proxy; everything else US (more proxies)
-    country = "in" if (".in" in domain or "in.louisvuitton" in domain or "ajio" in domain or "myntra" in domain or "tatacliq" in domain) else "us"
-
+    if not api_key: return None, "no_key"
+    params = {"api_key": api_key, "url": url, "country_code": country}
+    if mode == "premium":
+        params["render"] = "true"
+        params["premium"] = "true"
+    elif mode == "render":
+        params["render"] = "true"
+    # simple mode = no params, fastest
     try:
-        if progress_cb: progress_cb("Fetching via residential proxy…")
-        api_url = "https://api.scraperapi.com/"
-        params = {
-            "api_key": api_key,
-            "url": url,
-            "render": "true",        # critical for JS-rendered prices
-            "country_code": country,
-            "premium": "true",       # premium pool bypasses Akamai
-        }
-        resp = requests.get(api_url, params=params, timeout=90)
-        if resp.status_code == 200 and len(resp.text) > 500:
+        resp = requests.get("https://api.scraperapi.com/", params=params, timeout=timeout)
+        if resp.status_code == 200 and len(resp.text) > 300:
             return resp.text, "ok"
-        elif resp.status_code == 401:
-            return None, "invalid_key"
-        elif resp.status_code == 403:
-            return None, "no_credits"
-        elif resp.status_code == 429:
-            return None, "rate_limited"
-        else:
-            return None, f"http_{resp.status_code}"
-    except requests.Timeout:
-        return None, "timeout"
-    except Exception as e:
-        return None, f"error_{type(e).__name__}"
+        elif resp.status_code == 401: return None, "invalid_key"
+        elif resp.status_code == 403: return None, "no_credits"
+        elif resp.status_code == 429: return None, "rate_limited"
+        elif resp.status_code == 500: return None, "scrape_failed"
+        else: return None, f"http_{resp.status_code}"
+    except requests.Timeout: return None, "timeout"
+    except Exception as e: return None, f"error_{type(e).__name__}"
 
 
 def _walk_jsonld(node, found):
@@ -176,6 +159,13 @@ def _walk_jsonld(node, found):
         for v in node.values(): _walk_jsonld(v, found)
     elif isinstance(node, list):
         for i in node: _walk_jsonld(i, found)
+
+
+INDIAN_PRICE_KEYS = [
+    "sellingPrice", "finalPrice", "discountedPrice", "offerPrice",
+    "currentPrice", "salePrice", "displayPrice", "mrp", "MRP",
+    "actualPrice", "listPrice", "amount", "value", "price"
+]
 
 def _extract_from_html(html_str, url):
     soup = BeautifulSoup(html_str, "html.parser")
@@ -207,20 +197,24 @@ def _extract_from_html(html_str, url):
         if cm: r["currency"] = cm
 
     # CSS selectors
-    for sel in ['[itemprop="price"]', '.price', 'span[class*="price"]', 'div[class*="price"]',
-                '.product-price', '.product__price', '[data-price]', '.pdp-price', '.current-price']:
+    for sel in ['[itemprop="price"]', '.price', '#price',
+                'span[class*="price"]', 'div[class*="price"]', 'p[class*="price"]',
+                '.product-price', '.product__price', '[data-price]', '.pdp-price',
+                '.current-price', '.sale-price', '.selling-price',
+                '[class*="ProductPrice"]', '[class*="SellingPrice"]',
+                '[class*="PriceWidget"]', '[class*="PriceBlock"]']:
         if r["price"]: break
         try:
-            el = soup.select_one(sel)
-            if el:
+            for el in soup.select(sel)[:3]:
                 txt = el.get("content") or el.get_text(strip=True)
                 p = parse_amount(txt)
-                if p:
+                if p and p > 50:
                     r["price"] = p
                     if not r["currency"]: r["currency"] = detect_currency(txt)
+                    break
         except Exception: continue
 
-    for sel in ['[itemprop="name"]', 'h1[class*="product"]', '.product-name', '.product-title', '.pdp-title']:
+    for sel in ['[itemprop="name"]', 'h1[class*="product"]', '.product-name', '.product-title']:
         if r["title"]: break
         try:
             el = soup.select_one(sel)
@@ -229,7 +223,7 @@ def _extract_from_html(html_str, url):
 
     if not r["image"]:
         for sel in ['[itemprop="image"]', 'img[class*="product"]', 'img[class*="gallery"]',
-                     '.product-image img', 'img[class*="main"]']:
+                     '.product-image img', '[class*="ProductImage"] img']:
             try:
                 el = soup.select_one(sel)
                 if el:
@@ -246,139 +240,94 @@ def _extract_from_html(html_str, url):
         for sc in soup.find_all("script"):
             txt = sc.string or ""
             if len(txt) < 20: continue
-            for pat in [r'"price"\s*:\s*"?([\d.,]+)', r'"amount"\s*:\s*"?([\d.,]+)',
-                        r'"salePrice"\s*:\s*"?([\d.,]+)']:
-                m = re.search(pat, txt)
+            for key in INDIAN_PRICE_KEYS:
+                m = re.search(rf'"{key}"\s*:\s*"?([\d.,]+)', txt)
                 if m:
                     v = parse_amount(m.group(1))
-                    if v and v > 50: r["price"] = v; break
+                    if v and 50 < v < 10000000:
+                        r["price"] = v
+                        break
             if r["price"]: break
 
-    # H1 fallback
     if not r["title"]:
         h1 = soup.find("h1")
         if h1: r["title"] = h1.get_text(strip=True)[:100]
 
-    # Body text price scan
     if not r["price"]:
         text = soup.get_text(" ", strip=True)
-        for pat in [r"₹\s?([\d][\d.,]{2,})", r"Rs\.?\s?([\d][\d.,]{2,})",
-                     r"\$\s?([\d][\d.,]{2,})", r"€\s?([\d][\d.,]{2,})", r"£\s?([\d][\d.,]{2,})"]:
+        for pat in [r"₹\s*([\d][\d,]+(?:\.\d+)?)", r"Rs\.?\s*([\d][\d,]+(?:\.\d+)?)"]:
             m = re.search(pat, text)
             if m:
                 v = parse_amount(m.group(1))
-                if v and v > 50:
-                    r["price"] = v
-                    r["currency"] = detect_currency(m.group(0)) or "INR"
-                    break
+                if v and 50 < v < 10000000:
+                    r["price"] = v; r["currency"] = "INR"; break
 
     if r["price"] and not r["currency"]: r["currency"] = "INR"
     return r
 
-def _clean_title(title, url):
+
+def _clean_title(title):
     if not title: return title
     title = re.split(rf'\s*[|\-–—:]\s*(?:{BRANDS_RE})', title, flags=re.I)[0].strip()
-    title = re.sub(rf'^(?:Products?\s+by\s+)?(?:{BRANDS_RE})\s*[:|\-–—]\s*', '', title, flags=re.I).strip()
     title = re.sub(r'^Buy\s+', '', title, flags=re.I).strip()
-    title = re.sub(r'\s+Online.*$', '', title, flags=re.I).strip()
+    title = re.sub(r'\s+(?:Online|at Best Price).*$', '', title, flags=re.I).strip()
     if title and " | " in title: title = title.split(" | ")[0].strip()
     return title[:80] if title else None
 
 
-def extract_product_details(url, progress_cb=None):
-    """Master extraction — ScraperAPI first, then fallbacks."""
+def extract_product_details(url):
+    """Smart scraper — picks the right strategy per site. Fails fast on errors."""
     result = {"title": None, "price": None, "image": None, "currency": None,
               "ok": False, "method": None, "error": None}
     domain = urlparse(url).netloc.lower().replace("www.", "")
-    html = None
+    mode, country = _classify_site(url)
 
-    # ── STRATEGY 0: ScraperAPI (handles Akamai/Cloudflare via residential proxies) ──
-    sapi_html, sapi_status = _try_scraperapi(url, progress_cb=progress_cb)
-    if sapi_html:
-        html = sapi_html
-        result["method"] = "scraperapi"
-    elif sapi_status == "invalid_key":
-        result["error"] = "Your ScraperAPI key is invalid. Check Replit Secrets."
-    elif sapi_status == "no_credits":
-        result["error"] = "ScraperAPI credits exhausted for this month."
-    elif sapi_status == "rate_limited":
-        result["error"] = "ScraperAPI rate limit hit. Wait a moment and try again."
+    api_key = _get_scraper_api_key()
 
-    # ── STRATEGY 1: cloudscraper ──
-    if not html:
-        if progress_cb: progress_cb("Trying smart bypass…")
-        scraper = _get_cloudscraper()
-        if scraper:
-            try:
-                home = f"https://{urlparse(url).netloc}/"
-                try: scraper.get(home, timeout=8)
-                except Exception: pass
-                time.sleep(0.5)
-                resp = scraper.get(url, timeout=15)
-                if resp.status_code == 200 and len(resp.text) > 1000:
-                    html = resp.text
-                    result["method"] = "cloudscraper"
-            except Exception:
-                pass
+    # Try ScraperAPI if key exists
+    if api_key:
+        # Premium for Akamai sites takes 20-40s, render takes 8-15s, simple takes 3-5s
+        timeout = 50 if mode == "premium" else (20 if mode == "render" else 12)
+        html, status = _try_scraperapi(url, mode, country, timeout=timeout)
 
-    # ── STRATEGY 2: plain requests ──
-    if not html:
-        if progress_cb: progress_cb("Trying direct connection…")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
-        }
+        if status == "invalid_key":
+            result["error"] = "Your ScraperAPI key is invalid. Update it in Streamlit Cloud → Settings → Secrets."
+            return result
+        if status == "no_credits":
+            result["error"] = "ScraperAPI credits exhausted. Resets next month."
+            return result
+        if status == "rate_limited":
+            result["error"] = "ScraperAPI rate limit hit. Wait 30 seconds and try again."
+            return result
+        if status == "timeout":
+            result["error"] = f"Scraper timed out. The site may be very slow today — try again or enter manually."
+            return result
+
+        if html:
+            extracted = _extract_from_html(html, url)
+            for k in ("title", "price", "image", "currency"):
+                if extracted.get(k): result[k] = extracted[k]
+            result["method"] = mode
+
+    # If no API key OR ScraperAPI didn't get us a price, try direct (only for non-Akamai sites)
+    if not result["price"] and mode != "premium":
         try:
-            s = requests.Session()
-            try: s.get(f"https://{urlparse(url).netloc}/", headers=headers, timeout=8)
-            except Exception: pass
-            resp = s.get(url, headers=headers, timeout=15, allow_redirects=True)
-            if resp.status_code == 200 and len(resp.text) > 1000:
-                html = resp.text
-                result["method"] = "direct"
-        except Exception:
-            pass
-
-    # Extract from HTML
-    if html:
-        extracted = _extract_from_html(html, url)
-        for k in ("title", "price", "image", "currency"):
-            if extracted.get(k): result[k] = extracted[k]
-
-    # ── STRATEGY 3: Google fallback ──
-    if not result["price"] and not result["title"]:
-        if progress_cb: progress_cb("Searching for product info…")
-        try:
-            search_url = f"https://www.google.com/search?q={quote_plus(url)}&hl=en"
             headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"}
-            resp = requests.get(search_url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.content, "html.parser")
-                text = soup.get_text(" ", strip=True)
-                for pat in [r"₹\s?([\d][\d.,]{2,})", r"Rs\.?\s?([\d][\d.,]{2,})",
-                             r"\$\s?([\d][\d.,]{2,})", r"€\s?([\d][\d.,]{2,})"]:
-                    m = re.search(pat, text)
-                    if m:
-                        v = parse_amount(m.group(1))
-                        if v and v > 100:
-                            result["price"] = v
-                            result["currency"] = detect_currency(m.group(0)) or "INR"
-                            break
-                h3 = soup.find("h3")
-                if h3 and not result["title"]:
-                    result["title"] = h3.get_text(strip=True)[:80]
-                if not result["method"]: result["method"] = "google"
-        except Exception:
-            pass
+            resp = requests.get(url, headers=headers, timeout=8, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.text) > 1000:
+                extracted = _extract_from_html(resp.text, url)
+                for k in ("title", "price", "image", "currency"):
+                    if extracted.get(k) and not result.get(k): result[k] = extracted[k]
+                if not result["method"]: result["method"] = "direct"
+        except Exception: pass
 
-    # Build LV image from SKU if missing
+    # LV image from SKU
     if not result["image"] and "louisvuitton.com" in domain:
         sku = re.search(r'/([A-Z]{1,3}\d{4,6})', url)
         if sku:
             result["image"] = f"https://in.louisvuitton.com/images/is/image/lv/1/PP_VP_L/louis-vuitton--{sku.group(1)}_PM2_Front%20view.jpg?wid=400&hei=400"
 
-    result["title"] = _clean_title(result.get("title"), url)
+    result["title"] = _clean_title(result.get("title"))
     if result["price"] and not result["currency"]: result["currency"] = "INR"
     result["ok"] = bool(result["title"] or result["price"])
     return result
@@ -408,90 +357,217 @@ if st.session_state._clear_form:
 # =============================================================================
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@300;400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600&display=swap');
+
     :root {
-        --ink: #2C2420; --ink-mid: #4A3F38; --ink-soft: #6B5E56;
-        --cream: #F9F5F1; --warm-bg: #FDFAF7;
-        --blush: #EFE0D8; --border: #E0CFC5;
-        --accent: #B8897A; --accent-deep: #96675A;
-        --rose: #B34D4D; --rose-bg: #FBF0EE;
-        --green: #5C7A4A; --green-bg: #F0F4EB;
+        --ink: #1F1814; --ink-mid: #3D3530; --ink-soft: #5A4F47;
+        --cream: #F7F2EC; --warm-bg: #FCF8F4;
+        --blush: #ECD8CD; --border: #DCC9BE; --border-soft: #E8D9CE;
+        --accent: #B07A6A; --accent-deep: #8B5949;
+        --rose: #A83838; --rose-bg: #FAEAE8;
+        --green: #4A6638; --green-bg: #EEF3E5;
     }
+
     .stApp { background: var(--warm-bg) !important; }
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; color: var(--ink) !important; }
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1080px; }
+    html { font-size: 16px; }
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, system-ui, sans-serif !important;
+        color: var(--ink) !important;
+    }
+    .block-container { padding: 1.5rem 1.25rem 2rem !important; max-width: 1080px; }
     footer, #MainMenu, .stDeployButton { display: none !important; visibility: hidden !important; }
     header[data-testid="stHeader"] { background: transparent !important; }
-    h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; color: var(--ink) !important; font-weight: 500 !important; }
 
-    [data-testid="stSidebar"] { background: var(--cream) !important; border-right: 1px solid var(--border) !important; }
-    [data-testid="stSidebar"] h3 { font-family: 'Playfair Display', serif !important; font-size: 22px !important; color: var(--ink) !important; }
-    [data-testid="stSidebar"] h4 { font-family: 'Inter' !important; font-size: 13px !important; font-weight: 500 !important; letter-spacing: 0.06em !important; text-transform: uppercase !important; color: var(--ink-soft) !important; }
-    [data-testid="stSidebar"] label { font-family: 'Inter' !important; font-weight: 500 !important; font-size: 13px !important; color: var(--ink-mid) !important; }
+    h1, h2, h3 {
+        font-family: 'Playfair Display', Georgia, serif !important;
+        color: var(--ink) !important; font-weight: 500 !important;
+    }
 
-    .stTextInput input, .stNumberInput input { border-radius: 8px !important; border: 1px solid var(--border) !important; background: white !important; font-size: 14px !important; color: var(--ink) !important; }
-    .stTextInput input:focus, .stNumberInput input:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 2px rgba(184,137,122,0.2) !important; }
-    .stSelectbox div[data-baseweb="select"] > div { border-radius: 8px !important; border: 1px solid var(--border) !important; background: white !important; }
+    [data-testid="stSidebar"] {
+        background: var(--cream) !important;
+        border-right: 1px solid var(--border) !important;
+    }
+    [data-testid="stSidebar"] > div { padding: 1.5rem 1.25rem !important; }
+    [data-testid="stSidebar"] h3 {
+        font-family: 'Playfair Display', serif !important;
+        font-size: 24px !important; color: var(--ink) !important;
+        font-weight: 600 !important; margin-bottom: 8px !important;
+    }
+    [data-testid="stSidebar"] h4 {
+        font-family: 'Inter' !important; font-size: 13px !important;
+        font-weight: 600 !important; letter-spacing: 0.08em !important;
+        text-transform: uppercase !important; color: var(--ink-mid) !important;
+        margin: 16px 0 8px !important;
+    }
+    [data-testid="stSidebar"] label {
+        font-family: 'Inter' !important; font-weight: 600 !important;
+        font-size: 14px !important; color: var(--ink-mid) !important;
+    }
+    [data-testid="stSidebar"] .stCaption {
+        font-size: 13px !important; color: var(--ink-mid) !important;
+    }
 
-    .stButton > button { border-radius: 8px !important; font-family: 'Inter' !important; font-weight: 500 !important; font-size: 13px !important; }
-    .stButton > button[kind="primary"] { background: var(--ink) !important; color: white !important; border: none !important; }
-    .stButton > button[kind="primary"]:hover { background: var(--accent-deep) !important; }
-    .stButton > button:not([kind="primary"]) { background: white !important; color: var(--ink) !important; border: 1px solid var(--border) !important; }
-    .stButton > button:not([kind="primary"]):hover { border-color: var(--accent) !important; background: var(--cream) !important; }
+    .stTextInput input, .stNumberInput input {
+        border-radius: 10px !important; border: 1px solid var(--border) !important;
+        background: white !important; font-size: 16px !important;
+        color: var(--ink) !important; padding: 12px 14px !important;
+        min-height: 44px !important;
+    }
+    .stTextInput input::placeholder, .stNumberInput input::placeholder { color: #9A8A80 !important; }
+    .stTextInput input:focus, .stNumberInput input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px rgba(176,122,106,0.18) !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div {
+        border-radius: 10px !important; border: 1px solid var(--border) !important;
+        background: white !important; min-height: 44px !important; font-size: 16px !important;
+    }
 
-    .lux-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 14px; }
-    .lux-metric { background: var(--cream); border-radius: 12px; padding: 22px 16px; text-align: center; border: 1px solid var(--border); }
-    .lux-metric.warn { background: var(--rose-bg); border-color: #D4A0A0; }
-    .m-label { font-family: 'Inter'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 6px; }
+    .stButton > button {
+        border-radius: 10px !important; font-family: 'Inter' !important;
+        font-weight: 600 !important; font-size: 15px !important;
+        padding: 12px 18px !important; min-height: 46px !important;
+        transition: all 0.2s ease !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: var(--ink) !important; color: white !important;
+        border: none !important; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: var(--accent-deep) !important;
+        transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+    }
+    .stButton > button:not([kind="primary"]) {
+        background: white !important; color: var(--ink) !important;
+        border: 1px solid var(--border) !important;
+    }
+    .stButton > button:not([kind="primary"]):hover {
+        border-color: var(--accent) !important; background: var(--cream) !important;
+    }
+
+    .lux-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+    .lux-metric {
+        background: white; border-radius: 16px; padding: 22px 18px;
+        text-align: center; border: 1px solid var(--border);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .lux-metric.warn { background: var(--rose-bg); border-color: #D9A2A2; }
+    .m-label {
+        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--ink-mid); margin: 0 0 10px;
+    }
     .lux-metric.warn .m-label { color: var(--rose); }
-    .m-val { font-family: 'Playfair Display', serif; font-size: 24px; font-weight: 500; color: var(--ink); margin: 0; }
+    .m-val {
+        font-family: 'Playfair Display', serif; font-size: 28px; font-weight: 600;
+        color: var(--ink); margin: 0; line-height: 1.1;
+    }
     .lux-metric.warn .m-val { color: var(--rose); }
 
-    .bar-wrap { background: var(--cream); border-radius: 12px; padding: 16px 20px; border: 1px solid var(--border); margin-bottom: 20px; }
-    .bar-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-    .bar-head span:first-child { font-family: 'Inter'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
-    .bar-head .pct { font-family: 'Playfair Display', serif; font-size: 16px; color: var(--ink); }
-    .bar-track { height: 6px; border-radius: 6px; background: var(--blush); overflow: hidden; }
-    .bar-fill { height: 100%; border-radius: 6px; background: var(--accent); }
+    .bar-wrap {
+        background: white; border-radius: 16px; padding: 18px 22px;
+        border: 1px solid var(--border); margin-bottom: 22px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .bar-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+    .bar-head span:first-child {
+        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mid);
+    }
+    .bar-head .pct { font-family: 'Playfair Display', serif; font-size: 18px; color: var(--ink); font-weight: 600; }
+    .bar-track { height: 8px; border-radius: 8px; background: var(--blush); overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 8px; background: var(--accent); transition: width 0.4s ease; }
     .bar-fill.over { background: var(--rose); }
-    .bar-note { font-family: 'Inter'; font-size: 13px; color: var(--ink-soft); margin-top: 10px; line-height: 1.5; }
+    .bar-note { font-family: 'Inter'; font-size: 14px; color: var(--ink-mid); margin-top: 12px; line-height: 1.5; }
 
-    .sec-label { font-family: 'Inter'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 12px; }
+    .sec-label {
+        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--ink-mid); margin: 0 0 14px;
+    }
 
-    div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 10px !important; border: 1px solid var(--border) !important; background: var(--cream) !important; box-shadow: none !important; }
-    .thumb { width: 54px; height: 54px; border-radius: 8px; overflow: hidden; background: var(--blush); display: flex; align-items: center; justify-content: center; }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 14px !important; border: 1px solid var(--border) !important;
+        background: white !important; box-shadow: 0 1px 3px rgba(0,0,0,0.03) !important;
+    }
+    .thumb {
+        width: 60px; height: 60px; border-radius: 10px; overflow: hidden;
+        background: var(--blush); display: flex; align-items: center;
+        justify-content: center; flex-shrink: 0;
+    }
     .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .thumb-ph { font-size: 16px; color: var(--accent); }
-    .p-name { font-family: 'Playfair Display', serif; font-weight: 500; font-size: 15px; color: var(--ink); text-decoration: none; line-height: 1.35; }
+    .thumb-ph { font-size: 18px; color: var(--accent); }
+    .p-name {
+        font-family: 'Playfair Display', serif; font-weight: 600;
+        font-size: 16px; color: var(--ink); text-decoration: none; line-height: 1.3;
+    }
     a.p-name:hover { color: var(--accent-deep); }
-    .p-src { font-family: 'Inter'; font-size: 11px; color: var(--ink-soft); margin-top: 3px; }
-    .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-family: 'Inter'; font-size: 10px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
-    .p-price { font-family: 'Playfair Display', serif; font-weight: 500; font-size: 17px; color: var(--ink); text-align: right; }
+    .p-src { font-family: 'Inter'; font-size: 12px; color: var(--ink-soft); margin-top: 4px; }
+    .badge {
+        display: inline-block; padding: 3px 10px; border-radius: 6px;
+        font-family: 'Inter'; font-size: 11px; font-weight: 600;
+        letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .p-price {
+        font-family: 'Playfair Display', serif; font-weight: 600;
+        font-size: 19px; color: var(--ink); text-align: right;
+    }
 
-    .notes-card { background: var(--cream); border-radius: 12px; padding: 18px; border: 1px solid var(--border); }
-    .notes-card.warn { background: var(--rose-bg); border-color: #D4A0A0; }
-    .n-text { font-family: 'Inter'; font-size: 13px; line-height: 1.7; color: var(--ink-mid); margin-bottom: 6px; }
+    .notes-card {
+        background: white; border-radius: 14px; padding: 20px;
+        border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .notes-card.warn { background: var(--rose-bg); border-color: #D9A2A2; }
+    .n-text {
+        font-family: 'Inter'; font-size: 14px; line-height: 1.7;
+        color: var(--ink-mid); margin-bottom: 8px;
+    }
     .notes-card.warn .n-text { color: var(--rose); }
 
     .api-status {
-        font-family: 'Inter'; font-size: 11px; padding: 6px 10px;
-        border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+        font-family: 'Inter'; font-size: 13px; font-weight: 500;
+        padding: 8px 12px; border-radius: 8px; margin-bottom: 12px;
     }
     .api-status.on { background: var(--green-bg); color: var(--green); border: 1px solid #C5D5B3; }
-    .api-status.off { background: var(--rose-bg); color: var(--rose); border: 1px solid #D4A0A0; }
+    .api-status.off { background: var(--rose-bg); color: var(--rose); border: 1px solid #D9A2A2; }
 
-    .watermark { text-align: center; padding: 2.5rem 0 0.5rem; font-family: 'Inter'; font-size: 12px; color: var(--ink-soft); opacity: 0.4; }
-    .watermark .h { color: var(--accent-deep); }
+    .watermark { text-align: center; padding: 3rem 0 1rem; font-family: 'Inter'; font-size: 13px; color: var(--ink-soft); opacity: 0.6; }
+    .watermark .h { color: var(--accent-deep); font-size: 14px; }
 
-    .stAlert { border-radius: 10px !important; }
-    hr { border: none !important; border-top: 1px solid var(--border) !important; margin: 0.8rem 0 !important; }
+    .stAlert { border-radius: 12px !important; font-size: 14px !important; }
+    hr { border: none !important; border-top: 1px solid var(--border-soft) !important; margin: 1rem 0 !important; }
+
+    @media (max-width: 768px) {
+        .block-container { padding: 1rem 0.75rem 1.5rem !important; }
+        .lux-metrics { grid-template-columns: 1fr !important; gap: 10px !important; }
+        .lux-metric { padding: 18px 16px !important; }
+        .m-val { font-size: 24px !important; }
+        .m-label { font-size: 11px !important; margin-bottom: 6px !important; }
+        h1 { font-size: 26px !important; }
+        .bar-wrap { padding: 16px 18px !important; }
+        .bar-head .pct { font-size: 16px !important; }
+        .bar-note { font-size: 13px !important; }
+        .p-name { font-size: 15px !important; }
+        .p-price { font-size: 17px !important; }
+        .thumb { width: 50px; height: 50px; }
+    }
+    @media (max-width: 480px) {
+        h1 { font-size: 23px !important; }
+        .m-val { font-size: 22px !important; }
+        .lux-metric { padding: 16px 14px !important; }
+    }
+    @media (max-width: 640px) {
+        [data-testid="column"] { padding: 0 4px !important; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 def pbadge(p):
-    pal = {"Must have": ("#FBF0EE","#993D3D"), "Considering": ("#F0EBE6","#5A4D44"), "Someday": ("#EDEBF3","#5E5478")}
-    bg, fg = pal.get(p, ("#F0EBE6","#5A4D44"))
+    pal = {"Must have": ("#FAEAE8","#8B2828"),
+           "Considering": ("#EDE6DD","#4A3E33"),
+           "Someday": ("#E6E1F0","#4A3D6B")}
+    bg, fg = pal.get(p, ("#EDE6DD","#4A3E33"))
     return f'<span class="badge" style="background:{bg};color:{fg};">{p}</span>'
 
 
@@ -501,25 +577,17 @@ def pbadge(p):
 with st.sidebar:
     st.markdown("### The atelier")
 
-    # API status indicator
     has_key = bool(_get_scraper_api_key())
     if has_key:
         st.markdown('<div class="api-status on">✓ Premium scraping enabled</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="api-status off">⚠ Premium scraping not configured</div>', unsafe_allow_html=True)
-        with st.expander("How to enable LV/luxury scraping"):
+        with st.expander("How to enable luxury site scraping"):
             st.markdown("""
-**One-time setup (3 minutes):**
-
-1. Go to **scraperapi.com** → Sign up free
-2. Copy your **API key** from the dashboard
-3. In Replit: click **🔒 Secrets** in left sidebar
-4. Add new secret:
-   - Key: `SCRAPER_API_KEY`
-   - Value: *your-api-key*
-5. Restart the Repl (Stop → Run)
-
-Free tier: 5,000 requests/month — plenty for personal use.
+1. Sign up at **scraperapi.com**
+2. Copy your API key
+3. Streamlit Cloud → app Settings → Secrets
+4. Add: `SCRAPER_API_KEY = "your-key"`
             """)
 
     def _sb(): save_data()
@@ -536,11 +604,14 @@ Free tier: 5,000 requests/month — plenty for personal use.
         elif not url.startswith(("http://","https://")):
             st.session_state.fetch_note = "Enter a full URL starting with https://"
         else:
-            progress = st.empty()
-            def show_progress(msg): progress.caption(f"⏳ {msg}")
-            show_progress("Starting…")
-            res = extract_product_details(url, progress_cb=show_progress)
-            progress.empty()
+            mode, _ = _classify_site(url)
+            wait_msg = {
+                "premium": "Reading luxury site (20-45 sec)…",
+                "render": "Reading product page (8-15 sec)…",
+                "simple": "Reading product page (5-10 sec)…",
+            }[mode]
+            with st.spinner(wait_msg):
+                res = extract_product_details(url)
             if res["ok"]:
                 if res["title"]: st.session_state.f_name = res["title"]
                 if res["image"]: st.session_state.f_image = res["image"]
@@ -548,18 +619,16 @@ Free tier: 5,000 requests/month — plenty for personal use.
                     cur = res["currency"] or "INR"
                     rate = RATES.get(cur.upper(), 1.0)
                     st.session_state.f_price = round(res["price"] * rate, 2)
-                    method_tag = {"scraperapi":"premium","cloudscraper":"bypass","direct":"direct","google":"search"}.get(res.get("method"),"")
                     if cur.upper() != "INR":
-                        st.session_state.fetch_note = f"✓ Converted {cur.upper()} {res['price']:,.0f} → ~{fmt_inr(st.session_state.f_price)} ({method_tag})"
+                        st.session_state.fetch_note = f"✓ Converted {cur.upper()} {res['price']:,.0f} → ~{fmt_inr(st.session_state.f_price)}"
                     else:
-                        st.session_state.fetch_note = f"✓ Details found ({method_tag}) — review below."
+                        st.session_state.fetch_note = "✓ Details found — review below."
                 else:
-                    st.session_state.fetch_note = "Found name but not price. Enter price manually."
+                    st.session_state.fetch_note = "Got name but no price. Enter the price manually."
+            elif res.get("error"):
+                st.session_state.fetch_note = res["error"]
             else:
-                if res.get("error"):
-                    st.session_state.fetch_note = res["error"]
-                else:
-                    st.session_state.fetch_note = "Could not read this page. Enter details manually."
+                st.session_state.fetch_note = "Could not read this page. Enter details manually."
         st.rerun()
 
     if st.session_state.fetch_note:
@@ -594,10 +663,10 @@ Free tier: 5,000 requests/month — plenty for personal use.
 # 7. MAIN
 # =============================================================================
 st.markdown(
-    '<div style="text-align:center; margin-bottom:1.2rem;">'
-    '<h1 style="font-size:30px; margin:0;">Luxury Shopping Calculator</h1>'
-    '<p style="font-family:Inter; font-size:12px; font-weight:400; letter-spacing:0.1em; '
-    'text-transform:uppercase; color:#6B5E56; margin-top:4px;">Wardrobe investment planner</p>'
+    '<div style="text-align:center; margin-bottom:1.5rem;">'
+    '<h1 style="font-size:32px; margin:0; font-weight:600;">Luxury Shopping Calculator</h1>'
+    '<p style="font-family:Inter; font-size:13px; font-weight:500; letter-spacing:0.12em; '
+    'text-transform:uppercase; color:#5A4F47; margin-top:6px;">Wardrobe investment planner</p>'
     '</div>', unsafe_allow_html=True)
 
 budget = float(st.session_state.total_budget)
@@ -630,7 +699,7 @@ with col_items:
     else:
         for idx, item in enumerate(st.session_state.shopping_list):
             with st.container(border=True):
-                ci, cn, cp = st.columns([0.55, 3.2, 1.5])
+                ci, cn, cp = st.columns([0.6, 3.2, 1.5])
                 with ci:
                     if item.get("image"):
                         st.markdown(f'<div class="thumb"><img src="{item["image"]}" '
@@ -644,7 +713,7 @@ with col_items:
                                     unsafe_allow_html=True)
                     else:
                         st.markdown(f'<span class="p-name">{item["name"]}</span>', unsafe_allow_html=True)
-                    st.markdown(f'<div style="margin-top:4px;">{pbadge(item.get("priority","Considering"))}'
+                    st.markdown(f'<div style="margin-top:6px;">{pbadge(item.get("priority","Considering"))}'
                                 f' <span class="p-src">{item["source"]}</span></div>', unsafe_allow_html=True)
                 with cp:
                     st.markdown(f'<div class="p-price">{fmt_inr(item["price"])}</div>', unsafe_allow_html=True)
@@ -673,7 +742,7 @@ with col_notes:
             n += (f'<p class="n-text">Your curation is perfectly balanced.</p>'
                   f'<p class="n-text">{fmt_inr(remaining)} of room remaining.</p>')
         n += '<hr>'
-        n += (f'<p class="n-text" style="font-size:12px;">Top piece: <b>{dearest["name"]}</b> — {fmt_inr(dearest["price"])}<br>'
+        n += (f'<p class="n-text" style="font-size:13px;">Top piece: <b>{dearest["name"]}</b> — {fmt_inr(dearest["price"])}<br>'
               f'Average: <b>{fmt_inr(avg)}</b>/item &nbsp;·&nbsp; Items: <b>{count}</b></p></div>')
         st.markdown(n, unsafe_allow_html=True)
 
