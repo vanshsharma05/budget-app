@@ -111,6 +111,28 @@ def _try_direct(url, timeout=8):
     return None
 
 
+def _try_microlink(url, timeout=10):
+    """Microlink: free OG metadata fetcher. Works on most protected luxury sites."""
+    try:
+        resp = requests.get(f"https://api.microlink.io/?url={url}", timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "success":
+                d = data.get("data", {})
+                img = d.get("image")
+                if isinstance(img, dict):
+                    img = img.get("url")
+                return {
+                    "title": d.get("title"),
+                    "image": img,
+                    "description": d.get("description"),
+                    "publisher": d.get("publisher"),
+                }
+    except Exception:
+        pass
+    return None
+
+
 def _extract_from_jina(content, url):
     """Parse Jina's markdown output for title/price/image."""
     r = {"title": None, "price": None, "image": None, "currency": None}
@@ -246,7 +268,7 @@ def _clean_title(title):
 
 
 def extract_product_details(url):
-    """Fast, free scraping. Jina first (works on LV), direct as backup."""
+    """Fast, free scraping. Jina → Microlink → direct HTML."""
     result = {"title": None, "price": None, "image": None, "currency": None, "ok": False}
     domain = urlparse(url).netloc.lower().replace("www.", "")
 
@@ -257,7 +279,31 @@ def extract_product_details(url):
         for k in ("title", "price", "image", "currency"):
             if extracted.get(k): result[k] = extracted[k]
 
-    # STRATEGY 2: Direct HTML if Jina didn't get a price
+    # STRATEGY 2: Microlink for OG metadata (covers Dior, Hermès-style protected sites)
+    if not result["title"] or not result["image"] or not result["price"]:
+        microlink = _try_microlink(url)
+        if microlink:
+            if not result["title"] and microlink.get("title"):
+                result["title"] = microlink["title"]
+            if not result["image"] and microlink.get("image"):
+                result["image"] = microlink["image"]
+            # Many luxury sites put price in the meta description
+            if not result["price"] and microlink.get("description"):
+                desc = microlink["description"]
+                for pat, cur in [(r"₹\s*([\d][\d,]+(?:\.\d+)?)", "INR"),
+                                  (r"Rs\.?\s*([\d][\d,]+(?:\.\d+)?)", "INR"),
+                                  (r"\$\s*([\d][\d,]+(?:\.\d+)?)", "USD"),
+                                  (r"€\s*([\d][\d,]+(?:\.\d+)?)", "EUR"),
+                                  (r"£\s*([\d][\d,]+(?:\.\d+)?)", "GBP")]:
+                    m = re.search(pat, desc)
+                    if m:
+                        v = parse_amount(m.group(1))
+                        if v and 50 < v < 50000000:
+                            result["price"] = v
+                            result["currency"] = cur
+                            break
+
+    # STRATEGY 3: Direct HTML if still no price
     if not result["price"]:
         html = _try_direct(url)
         if html:
