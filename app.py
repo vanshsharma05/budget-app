@@ -258,12 +258,30 @@ def _extract_from_html(html_str, url):
     return r
 
 
+def _is_garbage_title(title):
+    """Detect blocked/error pages disguised as titles."""
+    if not title or len(title.strip()) < 3:
+        return True
+    bad_phrases = [
+        "page unavailable", "access denied", "forbidden", "404",
+        "page not found", "just a moment", "verify you are human",
+        "are you a robot", "checking your browser", "service unavailable",
+        "cloudflare", "sucuri", "bot verification", "please wait",
+        "captcha", "ddos-guard", "attention required", "unauthorized",
+        "error", "blocked", "incapsula", "imperva", "akamai",
+    ]
+    t = title.lower().strip()
+    return any(bad in t for bad in bad_phrases)
+
+
 def _clean_title(title):
-    if not title: return title
+    if not title: return None
+    if _is_garbage_title(title): return None
     title = re.split(rf'\s*[|\-–—:]\s*(?:{BRANDS_RE})', title, flags=re.I)[0].strip()
     title = re.sub(r'^Buy\s+', '', title, flags=re.I).strip()
     title = re.sub(r'\s+(?:Online|at Best Price).*$', '', title, flags=re.I).strip()
     if title and " | " in title: title = title.split(" | ")[0].strip()
+    if _is_garbage_title(title): return None
     return title[:80] if title else None
 
 
@@ -276,6 +294,9 @@ def extract_product_details(url):
     jina_content = _try_jina(url)
     if jina_content:
         extracted = _extract_from_jina(jina_content, url)
+        # Skip if Jina returned a blocked page disguised as content
+        if extracted.get("title") and _is_garbage_title(extracted["title"]):
+            extracted["title"] = None
         for k in ("title", "price", "image", "currency"):
             if extracted.get(k): result[k] = extracted[k]
 
@@ -283,8 +304,10 @@ def extract_product_details(url):
     if not result["title"] or not result["image"] or not result["price"]:
         microlink = _try_microlink(url)
         if microlink:
-            if not result["title"] and microlink.get("title"):
-                result["title"] = microlink["title"]
+            mtitle = microlink.get("title")
+            # Skip Microlink title if it's a blocked-page indicator
+            if mtitle and not _is_garbage_title(mtitle) and not result["title"]:
+                result["title"] = mtitle
             if not result["image"] and microlink.get("image"):
                 result["image"] = microlink["image"]
             # Many luxury sites put price in the meta description
@@ -406,18 +429,53 @@ st.markdown("""
     }
 
     /* Sidebar caption box — much more visible */
-    [data-testid="stSidebar"] .stCaption {
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    [data-testid="stSidebar"] small,
+    [data-testid="stSidebar"] p.st-caption {
         background: white !important;
         border: 1px solid var(--border) !important;
         border-radius: 8px !important;
         padding: 10px 12px !important;
         font-size: 13px !important;
         line-height: 1.5 !important;
-        color: var(--ink-mid) !important;
-        font-weight: 500 !important;
+        color: var(--ink) !important;
+        font-weight: 600 !important;
         margin: 8px 0 12px !important;
         word-wrap: break-word !important;
         white-space: normal !important;
+        display: block !important;
+    }
+
+    /* Spinner text — make it visible on cream background */
+    [data-testid="stSpinner"],
+    [data-testid="stSpinner"] > div,
+    [data-testid="stSpinner"] p,
+    [data-testid="stSpinner"] span,
+    .stSpinner,
+    .stSpinner > div,
+    .stSpinner p {
+        color: var(--ink) !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+    }
+    [data-testid="stSpinner"] i,
+    .stSpinner i {
+        border-top-color: var(--accent) !important;
+        border-left-color: var(--accent) !important;
+    }
+
+    /* General caption visibility outside sidebar too */
+    .stCaption, [data-testid="stCaptionContainer"] {
+        color: var(--ink-mid) !important;
+        font-weight: 500 !important;
+    }
+
+    /* Selectbox dropdown text */
+    [data-baseweb="popover"] li,
+    [data-baseweb="menu"] li {
+        color: var(--ink) !important;
+        font-weight: 500 !important;
     }
 
     /* INPUTS */
