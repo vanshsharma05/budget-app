@@ -2,9 +2,9 @@ import streamlit as st
 import re
 import json
 import os
-from urllib.parse import urlparse, urljoin, quote_plus
-from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 import requests
+from bs4 import BeautifulSoup
 
 st.set_page_config(
     page_title="Luxury Shopping Calculator",
@@ -40,7 +40,6 @@ def save_data():
 # =============================================================================
 RATES = {"INR":1.0, "USD":86.0, "EUR":93.0, "GBP":109.0, "AED":23.0,
          "JPY":0.57, "CNY":12.0, "SGD":64.0, "CAD":62.0, "AUD":56.0, "CHF":98.0}
-CUR_SYM = {"₹":"INR", "$":"USD", "€":"EUR", "£":"GBP", "¥":"JPY"}
 
 def fmt_inr(n):
     n = round(abs(n))
@@ -68,201 +67,172 @@ def parse_amount(raw):
     except ValueError:
         return None
 
-def detect_currency(text):
-    for sym, code in CUR_SYM.items():
-        if sym in text: return code
-    m = re.search(r"\b(INR|USD|EUR|GBP|AED|JPY|CNY|SGD|CAD|AUD|CHF|Rs)\b", text, re.I)
-    if m:
-        c = m.group(1).upper()
-        return "INR" if c == "RS" else c
+def detect_currency_from_text(text):
+    if "₹" in text or "Rs" in text or "INR" in text: return "INR"
+    if "$" in text or "USD" in text: return "USD"
+    if "€" in text or "EUR" in text: return "EUR"
+    if "£" in text or "GBP" in text: return "GBP"
     return None
 
 # =============================================================================
-# 3. SCRAPER — fail fast, smart strategy per site
+# 3. JINA READER SCRAPER — free, no key, 2-5 sec, works on LV
 # =============================================================================
-BRANDS_RE = r'Louis Vuitton|Gucci|Prada|Chanel|Dior|Herm[eè]s|Burberry|Versace|Fendi|Balenciaga|Bottega Veneta|Cartier|Tiffany|Jimmy Choo|Christian Louboutin|Saint Laurent|YSL|Celine|Valentino|Givenchy|Bvlgari|Tom Ford|Moncler|TataCLiQ|Tata CLiQ|Myntra|Ajio|Nykaa|Official'
+BRANDS_RE = r'Louis Vuitton|Gucci|Prada|Chanel|Dior|Herm[eè]s|Burberry|Versace|Fendi|Balenciaga|Bottega Veneta|Cartier|Tiffany|Saint Laurent|YSL|Celine|Valentino|Givenchy|Bvlgari|Tom Ford|TataCLiQ|Tata CLiQ|Myntra|Ajio|Nykaa|Official'
 
-# Sites that need premium + JS rendering (heavy bot protection)
-AKAMAI_SITES = ["louisvuitton.com", "chanel.com", "hermes.com", "dior.com",
-                "gucci.com", "prada.com", "bottegaveneta.com", "ysl.com",
-                "burberry.com", "valentino.com", "saintlaurent.com"]
-# Indian sites that need render but not premium
-INDIAN_RENDER_SITES = ["tatacliq.com", "myntra.com", "ajio.com", "nykaa.com",
-                       "tatacliqluxury.com", "ajiomania.com"]
-
-
-def _get_scraper_api_key():
-    key = os.environ.get("SCRAPER_API_KEY", "").strip()
-    if not key:
-        try: key = st.secrets.get("SCRAPER_API_KEY", "").strip()
-        except Exception: pass
-    return key if key else None
-
-
-def _classify_site(url):
-    """Return ('premium'|'render'|'simple', country_code)."""
-    domain = urlparse(url).netloc.lower().replace("www.", "")
-    if any(s in domain for s in AKAMAI_SITES):
-        return ("premium", "in" if ".in" in domain else "us")
-    if any(s in domain for s in INDIAN_RENDER_SITES):
-        return ("render", "in")
-    if ".in" in domain or domain.endswith(".in"):
-        return ("simple", "in")
-    return ("simple", "us")
-
-
-def _try_scraperapi(url, mode, country, timeout=45):
-    """Returns (html, status). Status is 'ok', 'invalid_key', 'no_credits', 'rate_limited', or error string."""
-    api_key = _get_scraper_api_key()
-    if not api_key: return None, "no_key"
-    params = {"api_key": api_key, "url": url, "country_code": country}
-    if mode == "premium":
-        params["render"] = "true"
-        params["premium"] = "true"
-    elif mode == "render":
-        params["render"] = "true"
-    # simple mode = no params, fastest
+def _try_jina(url, timeout=12):
+    """Jina Reader: r.jina.ai proxies and renders any URL. Free, no API key."""
     try:
-        resp = requests.get("https://api.scraperapi.com/", params=params, timeout=timeout)
-        if resp.status_code == 200 and len(resp.text) > 300:
-            return resp.text, "ok"
-        elif resp.status_code == 401: return None, "invalid_key"
-        elif resp.status_code == 403: return None, "no_credits"
-        elif resp.status_code == 429: return None, "rate_limited"
-        elif resp.status_code == 500: return None, "scrape_failed"
-        else: return None, f"http_{resp.status_code}"
-    except requests.Timeout: return None, "timeout"
-    except Exception as e: return None, f"error_{type(e).__name__}"
+        jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "Accept": "text/markdown",
+            "User-Agent": "Mozilla/5.0 LuxuryCalculator/1.0",
+        }
+        resp = requests.get(jina_url, headers=headers, timeout=timeout)
+        if resp.status_code == 200 and len(resp.text) > 100:
+            return resp.text
+    except Exception:
+        pass
+    return None
 
 
-def _walk_jsonld(node, found):
-    if isinstance(node, dict):
-        types = " ".join(node.get("@type", [])) if isinstance(node.get("@type"), list) else str(node.get("@type", ""))
-        if "product" in types.lower():
-            if node.get("name") and not found.get("title"):
-                found["title"] = str(node["name"]).strip()
-            img = node.get("image")
-            if img and not found.get("image"):
-                if isinstance(img, list): img = img[0]
-                if isinstance(img, dict): img = img.get("url") or img.get("contentUrl")
-                if img: found["image"] = str(img)
-        offers = node.get("offers")
-        if offers:
-            for off in (offers if isinstance(offers, list) else [offers]):
-                if isinstance(off, dict):
-                    price = off.get("price") or off.get("lowPrice") or off.get("highPrice")
-                    if price and not found.get("price"):
-                        p = parse_amount(price)
-                        if p:
-                            found["price"] = p
-                            if off.get("priceCurrency"): found["currency"] = off["priceCurrency"]
-        for v in node.values(): _walk_jsonld(v, found)
-    elif isinstance(node, list):
-        for i in node: _walk_jsonld(i, found)
+def _try_direct(url, timeout=8):
+    """Direct fetch as backup — works for many sites."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-IN,en;q=0.9",
+        }
+        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        if resp.status_code == 200 and len(resp.text) > 500:
+            return resp.text
+    except Exception:
+        pass
+    return None
 
 
-INDIAN_PRICE_KEYS = [
-    "sellingPrice", "finalPrice", "discountedPrice", "offerPrice",
-    "currentPrice", "salePrice", "displayPrice", "mrp", "MRP",
-    "actualPrice", "listPrice", "amount", "value", "price"
-]
-
-def _extract_from_html(html_str, url):
-    soup = BeautifulSoup(html_str, "html.parser")
+def _extract_from_jina(content, url):
+    """Parse Jina's markdown output for title/price/image."""
     r = {"title": None, "price": None, "image": None, "currency": None}
 
-    # JSON-LD
-    found = {}
-    for sc in soup.find_all("script", type="application/ld+json"):
-        raw = sc.string or sc.get_text()
-        if not raw: continue
-        try: data = json.loads(raw)
-        except Exception:
-            try: data = json.loads(raw.strip().rstrip(";"))
-            except Exception: continue
-        _walk_jsonld(data, found)
-    r.update({k: found[k] for k in ("title","price","image","currency") if found.get(k)})
+    # Jina returns content like:
+    # Title: Product Name
+    # URL Source: ...
+    # Markdown Content:
+    # # Heading
+    # ![alt](image-url)
+    # Price ₹42,500 etc.
+
+    # Extract title from "Title:" header
+    m = re.search(r'^Title:\s*(.+?)$', content, re.M)
+    if m:
+        r["title"] = m.group(1).strip()
+
+    # Or from first markdown heading
+    if not r["title"]:
+        m = re.search(r'^#+\s+(.+?)$', content, re.M)
+        if m:
+            r["title"] = m.group(1).strip()
+
+    # Extract image: first markdown image
+    img_matches = re.findall(r'!\[[^\]]*\]\((https?://[^\)]+)\)', content)
+    for img in img_matches:
+        # Skip tiny icons, logos, base64
+        if any(skip in img.lower() for skip in ["logo", "icon", "favicon", "data:image"]):
+            continue
+        if any(ext in img.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            r["image"] = img
+            break
+    if not r["image"] and img_matches:
+        r["image"] = img_matches[0]
+
+    # Extract price — try multiple patterns, INR first
+    price_patterns = [
+        (r"₹\s*([\d][\d,]+(?:\.\d{1,2})?)", "INR"),
+        (r"Rs\.?\s*([\d][\d,]+(?:\.\d{1,2})?)", "INR"),
+        (r"INR\s*([\d][\d,]+(?:\.\d{1,2})?)", "INR"),
+        (r"\$\s*([\d][\d,]+(?:\.\d{1,2})?)", "USD"),
+        (r"€\s*([\d][\d,]+(?:\.\d{1,2})?)", "EUR"),
+        (r"£\s*([\d][\d,]+(?:\.\d{1,2})?)", "GBP"),
+    ]
+    for pat, cur in price_patterns:
+        m = re.search(pat, content)
+        if m:
+            v = parse_amount(m.group(1))
+            if v and 50 < v < 50000000:
+                r["price"] = v
+                r["currency"] = cur
+                break
+
+    return r
+
+
+def _extract_from_html(html_str, url):
+    """Parse HTML directly for sites where Jina fails."""
+    soup = BeautifulSoup(html_str, "html.parser")
+    r = {"title": None, "price": None, "image": None, "currency": None}
 
     # Meta tags
     def meta(prop, attr="property"):
         tag = soup.find("meta", {attr: prop})
         return tag.get("content","").strip() if tag and tag.get("content") else None
 
-    if not r["title"]: r["title"] = meta("og:title") or meta("twitter:title")
-    if not r["image"]: r["image"] = meta("og:image:secure_url") or meta("og:image") or meta("twitter:image")
-    if not r["price"]:
-        pm = meta("product:price:amount") or meta("og:price:amount")
-        if pm: r["price"] = parse_amount(pm)
-        cm = meta("product:price:currency") or meta("og:price:currency")
-        if cm: r["currency"] = cm
+    r["title"] = meta("og:title") or meta("twitter:title")
+    r["image"] = meta("og:image:secure_url") or meta("og:image") or meta("twitter:image")
+    pm = meta("product:price:amount") or meta("og:price:amount")
+    if pm: r["price"] = parse_amount(pm)
+    cm = meta("product:price:currency") or meta("og:price:currency")
+    if cm: r["currency"] = cm
 
-    # CSS selectors
-    for sel in ['[itemprop="price"]', '.price', '#price',
-                'span[class*="price"]', 'div[class*="price"]', 'p[class*="price"]',
-                '.product-price', '.product__price', '[data-price]', '.pdp-price',
-                '.current-price', '.sale-price', '.selling-price',
-                '[class*="ProductPrice"]', '[class*="SellingPrice"]',
-                '[class*="PriceWidget"]', '[class*="PriceBlock"]']:
-        if r["price"]: break
-        try:
-            for el in soup.select(sel)[:3]:
-                txt = el.get("content") or el.get_text(strip=True)
-                p = parse_amount(txt)
-                if p and p > 50:
-                    r["price"] = p
-                    if not r["currency"]: r["currency"] = detect_currency(txt)
-                    break
-        except Exception: continue
-
-    for sel in ['[itemprop="name"]', 'h1[class*="product"]', '.product-name', '.product-title']:
-        if r["title"]: break
-        try:
-            el = soup.select_one(sel)
-            if el and el.get_text(strip=True): r["title"] = el.get_text(strip=True)
-        except Exception: continue
-
-    if not r["image"]:
-        for sel in ['[itemprop="image"]', 'img[class*="product"]', 'img[class*="gallery"]',
-                     '.product-image img', '[class*="ProductImage"] img']:
-            try:
-                el = soup.select_one(sel)
-                if el:
-                    src = el.get("src") or el.get("data-src") or el.get("data-lazy-src")
-                    if src:
-                        src = src.strip()
-                        if src.startswith("//"): src = "https:" + src
-                        elif src.startswith("/"): src = urljoin(url, src)
-                        r["image"] = src; break
+    # JSON-LD
+    if not r["price"] or not r["title"]:
+        for sc in soup.find_all("script", type="application/ld+json"):
+            raw = sc.string or sc.get_text()
+            if not raw: continue
+            try: data = json.loads(raw)
             except Exception: continue
 
-    # Script mining
-    if not r["price"]:
-        for sc in soup.find_all("script"):
-            txt = sc.string or ""
-            if len(txt) < 20: continue
-            for key in INDIAN_PRICE_KEYS:
-                m = re.search(rf'"{key}"\s*:\s*"?([\d.,]+)', txt)
-                if m:
-                    v = parse_amount(m.group(1))
-                    if v and 50 < v < 10000000:
-                        r["price"] = v
-                        break
-            if r["price"]: break
+            def walk(node):
+                if isinstance(node, dict):
+                    if "Product" in str(node.get("@type", "")):
+                        if not r["title"] and node.get("name"):
+                            r["title"] = str(node["name"]).strip()
+                        img = node.get("image")
+                        if img and not r["image"]:
+                            if isinstance(img, list): img = img[0]
+                            if isinstance(img, dict): img = img.get("url")
+                            if img: r["image"] = str(img)
+                    offers = node.get("offers")
+                    if offers and not r["price"]:
+                        offs = offers if isinstance(offers, list) else [offers]
+                        for off in offs:
+                            if isinstance(off, dict):
+                                p = off.get("price")
+                                if p:
+                                    pv = parse_amount(p)
+                                    if pv: r["price"] = pv
+                                    if off.get("priceCurrency"): r["currency"] = off["priceCurrency"]
+                    for v in node.values(): walk(v)
+                elif isinstance(node, list):
+                    for i in node: walk(i)
+            walk(data)
+            if r["price"] and r["title"]: break
 
+    # H1 fallback
     if not r["title"]:
         h1 = soup.find("h1")
         if h1: r["title"] = h1.get_text(strip=True)[:100]
 
+    # Body text price scan
     if not r["price"]:
         text = soup.get_text(" ", strip=True)
-        for pat in [r"₹\s*([\d][\d,]+(?:\.\d+)?)", r"Rs\.?\s*([\d][\d,]+(?:\.\d+)?)"]:
+        for pat in [r"₹\s*([\d][\d,]+(?:\.\d{1,2})?)", r"Rs\.?\s*([\d][\d,]+(?:\.\d{1,2})?)"]:
             m = re.search(pat, text)
             if m:
                 v = parse_amount(m.group(1))
-                if v and 50 < v < 10000000:
+                if v and 50 < v < 50000000:
                     r["price"] = v; r["currency"] = "INR"; break
 
-    if r["price"] and not r["currency"]: r["currency"] = "INR"
     return r
 
 
@@ -276,52 +246,26 @@ def _clean_title(title):
 
 
 def extract_product_details(url):
-    """Smart scraper — picks the right strategy per site. Fails fast on errors."""
-    result = {"title": None, "price": None, "image": None, "currency": None,
-              "ok": False, "method": None, "error": None}
+    """Fast, free scraping. Jina first (works on LV), direct as backup."""
+    result = {"title": None, "price": None, "image": None, "currency": None, "ok": False}
     domain = urlparse(url).netloc.lower().replace("www.", "")
-    mode, country = _classify_site(url)
 
-    api_key = _get_scraper_api_key()
+    # STRATEGY 1: Jina Reader (fast, free, handles JS)
+    jina_content = _try_jina(url)
+    if jina_content:
+        extracted = _extract_from_jina(jina_content, url)
+        for k in ("title", "price", "image", "currency"):
+            if extracted.get(k): result[k] = extracted[k]
 
-    # Try ScraperAPI if key exists
-    if api_key:
-        # Premium for Akamai sites takes 20-40s, render takes 8-15s, simple takes 3-5s
-        timeout = 50 if mode == "premium" else (20 if mode == "render" else 12)
-        html, status = _try_scraperapi(url, mode, country, timeout=timeout)
-
-        if status == "invalid_key":
-            result["error"] = "Your ScraperAPI key is invalid. Update it in Streamlit Cloud → Settings → Secrets."
-            return result
-        if status == "no_credits":
-            result["error"] = "ScraperAPI credits exhausted. Resets next month."
-            return result
-        if status == "rate_limited":
-            result["error"] = "ScraperAPI rate limit hit. Wait 30 seconds and try again."
-            return result
-        if status == "timeout":
-            result["error"] = f"Scraper timed out. The site may be very slow today — try again or enter manually."
-            return result
-
+    # STRATEGY 2: Direct HTML if Jina didn't get a price
+    if not result["price"]:
+        html = _try_direct(url)
         if html:
             extracted = _extract_from_html(html, url)
             for k in ("title", "price", "image", "currency"):
-                if extracted.get(k): result[k] = extracted[k]
-            result["method"] = mode
+                if extracted.get(k) and not result.get(k): result[k] = extracted[k]
 
-    # If no API key OR ScraperAPI didn't get us a price, try direct (only for non-Akamai sites)
-    if not result["price"] and mode != "premium":
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"}
-            resp = requests.get(url, headers=headers, timeout=8, allow_redirects=True)
-            if resp.status_code == 200 and len(resp.text) > 1000:
-                extracted = _extract_from_html(resp.text, url)
-                for k in ("title", "price", "image", "currency"):
-                    if extracted.get(k) and not result.get(k): result[k] = extracted[k]
-                if not result["method"]: result["method"] = "direct"
-        except Exception: pass
-
-    # LV image from SKU
+    # LV image fallback from SKU pattern
     if not result["image"] and "louisvuitton.com" in domain:
         sku = re.search(r'/([A-Z]{1,3}\d{4,6})', url)
         if sku:
@@ -353,19 +297,29 @@ if st.session_state._clear_form:
     st.session_state._clear_form = False
 
 # =============================================================================
-# 5. STYLING
+# 5. STYLING — readable, high contrast, mobile-friendly
 # =============================================================================
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
     :root {
-        --ink: #1F1814; --ink-mid: #3D3530; --ink-soft: #5A4F47;
-        --cream: #F7F2EC; --warm-bg: #FCF8F4;
-        --blush: #ECD8CD; --border: #DCC9BE; --border-soft: #E8D9CE;
-        --accent: #B07A6A; --accent-deep: #8B5949;
-        --rose: #A83838; --rose-bg: #FAEAE8;
-        --green: #4A6638; --green-bg: #EEF3E5;
+        --ink: #1A130F;
+        --ink-mid: #2E2520;
+        --ink-soft: #4A3F38;
+        --cream: #F7F2EC;
+        --warm-bg: #FCF8F4;
+        --blush: #ECD8CD;
+        --border: #C9B3A6;
+        --border-soft: #DCC9BE;
+        --accent: #A66B5A;
+        --accent-deep: #804433;
+        --rose: #8B2828;
+        --rose-bg: #F8E5E3;
+        --green: #3D5429;
+        --green-bg: #ECF1E2;
+        --amber: #8B5E1A;
+        --amber-bg: #FAF1DC;
     }
 
     .stApp { background: var(--warm-bg) !important; }
@@ -380,9 +334,10 @@ st.markdown("""
 
     h1, h2, h3 {
         font-family: 'Playfair Display', Georgia, serif !important;
-        color: var(--ink) !important; font-weight: 500 !important;
+        color: var(--ink) !important; font-weight: 600 !important;
     }
 
+    /* SIDEBAR */
     [data-testid="stSidebar"] {
         background: var(--cream) !important;
         border-right: 1px solid var(--border) !important;
@@ -395,65 +350,86 @@ st.markdown("""
     }
     [data-testid="stSidebar"] h4 {
         font-family: 'Inter' !important; font-size: 13px !important;
-        font-weight: 600 !important; letter-spacing: 0.08em !important;
-        text-transform: uppercase !important; color: var(--ink-mid) !important;
-        margin: 16px 0 8px !important;
+        font-weight: 700 !important; letter-spacing: 0.08em !important;
+        text-transform: uppercase !important; color: var(--ink) !important;
+        margin: 16px 0 10px !important;
     }
     [data-testid="stSidebar"] label {
         font-family: 'Inter' !important; font-weight: 600 !important;
         font-size: 14px !important; color: var(--ink-mid) !important;
     }
+
+    /* Sidebar caption box — much more visible */
     [data-testid="stSidebar"] .stCaption {
-        font-size: 13px !important; color: var(--ink-mid) !important;
+        background: white !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 8px !important;
+        padding: 10px 12px !important;
+        font-size: 13px !important;
+        line-height: 1.5 !important;
+        color: var(--ink-mid) !important;
+        font-weight: 500 !important;
+        margin: 8px 0 12px !important;
+        word-wrap: break-word !important;
+        white-space: normal !important;
     }
 
+    /* INPUTS */
     .stTextInput input, .stNumberInput input {
         border-radius: 10px !important; border: 1px solid var(--border) !important;
         background: white !important; font-size: 16px !important;
         color: var(--ink) !important; padding: 12px 14px !important;
-        min-height: 44px !important;
+        min-height: 46px !important;
     }
-    .stTextInput input::placeholder, .stNumberInput input::placeholder { color: #9A8A80 !important; }
+    .stTextInput input::placeholder, .stNumberInput input::placeholder {
+        color: #8A7A70 !important;
+    }
     .stTextInput input:focus, .stNumberInput input:focus {
         border-color: var(--accent) !important;
-        box-shadow: 0 0 0 3px rgba(176,122,106,0.18) !important;
+        box-shadow: 0 0 0 3px rgba(166,107,90,0.2) !important;
     }
     .stSelectbox div[data-baseweb="select"] > div {
         border-radius: 10px !important; border: 1px solid var(--border) !important;
-        background: white !important; min-height: 44px !important; font-size: 16px !important;
+        background: white !important; min-height: 46px !important; font-size: 16px !important;
+        color: var(--ink) !important;
+    }
+    .stSelectbox div[data-baseweb="select"] span {
+        color: var(--ink) !important; font-weight: 500 !important;
     }
 
+    /* BUTTONS */
     .stButton > button {
         border-radius: 10px !important; font-family: 'Inter' !important;
         font-weight: 600 !important; font-size: 15px !important;
-        padding: 12px 18px !important; min-height: 46px !important;
+        padding: 12px 18px !important; min-height: 48px !important;
         transition: all 0.2s ease !important;
     }
     .stButton > button[kind="primary"] {
         background: var(--ink) !important; color: white !important;
-        border: none !important; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        border: none !important; box-shadow: 0 2px 4px rgba(0,0,0,0.08);
     }
     .stButton > button[kind="primary"]:hover {
-        background: var(--accent-deep) !important;
-        transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+        background: var(--accent-deep) !important; transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.12);
     }
     .stButton > button:not([kind="primary"]) {
         background: white !important; color: var(--ink) !important;
-        border: 1px solid var(--border) !important;
+        border: 1.5px solid var(--border) !important;
     }
     .stButton > button:not([kind="primary"]):hover {
         border-color: var(--accent) !important; background: var(--cream) !important;
     }
 
+    /* METRIC CARDS */
     .lux-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
     .lux-metric {
         background: white; border-radius: 16px; padding: 22px 18px;
-        text-align: center; border: 1px solid var(--border);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+        text-align: center; border: 1px solid var(--border-soft);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
-    .lux-metric.warn { background: var(--rose-bg); border-color: #D9A2A2; }
+    .lux-metric.warn { background: var(--rose-bg); border-color: #C58080; }
     .m-label {
-        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        font-family: 'Inter'; font-size: 12px; font-weight: 700;
         letter-spacing: 0.1em; text-transform: uppercase;
         color: var(--ink-mid); margin: 0 0 10px;
     }
@@ -464,31 +440,39 @@ st.markdown("""
     }
     .lux-metric.warn .m-val { color: var(--rose); }
 
+    /* BAR */
     .bar-wrap {
         background: white; border-radius: 16px; padding: 18px 22px;
-        border: 1px solid var(--border); margin-bottom: 22px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+        border: 1px solid var(--border-soft); margin-bottom: 22px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
     .bar-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
     .bar-head span:first-child {
-        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        font-family: 'Inter'; font-size: 12px; font-weight: 700;
         letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-mid);
     }
-    .bar-head .pct { font-family: 'Playfair Display', serif; font-size: 18px; color: var(--ink); font-weight: 600; }
+    .bar-head .pct {
+        font-family: 'Playfair Display', serif; font-size: 18px;
+        color: var(--ink); font-weight: 600;
+    }
     .bar-track { height: 8px; border-radius: 8px; background: var(--blush); overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 8px; background: var(--accent); transition: width 0.4s ease; }
     .bar-fill.over { background: var(--rose); }
-    .bar-note { font-family: 'Inter'; font-size: 14px; color: var(--ink-mid); margin-top: 12px; line-height: 1.5; }
+    .bar-note {
+        font-family: 'Inter'; font-size: 14px; color: var(--ink-mid);
+        margin-top: 12px; line-height: 1.5; font-weight: 500;
+    }
 
     .sec-label {
-        font-family: 'Inter'; font-size: 12px; font-weight: 600;
+        font-family: 'Inter'; font-size: 12px; font-weight: 700;
         letter-spacing: 0.1em; text-transform: uppercase;
         color: var(--ink-mid); margin: 0 0 14px;
     }
 
+    /* PRODUCT CARDS */
     div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 14px !important; border: 1px solid var(--border) !important;
-        background: white !important; box-shadow: 0 1px 3px rgba(0,0,0,0.03) !important;
+        border-radius: 14px !important; border: 1px solid var(--border-soft) !important;
+        background: white !important; box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
     }
     .thumb {
         width: 60px; height: 60px; border-radius: 10px; overflow: hidden;
@@ -496,47 +480,69 @@ st.markdown("""
         justify-content: center; flex-shrink: 0;
     }
     .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .thumb-ph { font-size: 18px; color: var(--accent); }
+    .thumb-ph { font-size: 18px; color: var(--accent-deep); }
     .p-name {
         font-family: 'Playfair Display', serif; font-weight: 600;
         font-size: 16px; color: var(--ink); text-decoration: none; line-height: 1.3;
     }
     a.p-name:hover { color: var(--accent-deep); }
-    .p-src { font-family: 'Inter'; font-size: 12px; color: var(--ink-soft); margin-top: 4px; }
-    .badge {
-        display: inline-block; padding: 3px 10px; border-radius: 6px;
-        font-family: 'Inter'; font-size: 11px; font-weight: 600;
-        letter-spacing: 0.04em; text-transform: uppercase;
+    .p-src {
+        font-family: 'Inter'; font-size: 12px;
+        color: var(--ink-soft); margin-top: 4px; font-weight: 500;
     }
+
+    /* PRIORITY BADGES — much more visible */
+    .badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-family: 'Inter';
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        border: 1px solid;
+    }
+
     .p-price {
         font-family: 'Playfair Display', serif; font-weight: 600;
         font-size: 19px; color: var(--ink); text-align: right;
     }
 
+    /* STYLIST NOTES */
     .notes-card {
         background: white; border-radius: 14px; padding: 20px;
-        border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+        border: 1px solid var(--border-soft); box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
-    .notes-card.warn { background: var(--rose-bg); border-color: #D9A2A2; }
+    .notes-card.warn { background: var(--rose-bg); border-color: #C58080; }
     .n-text {
         font-family: 'Inter'; font-size: 14px; line-height: 1.7;
-        color: var(--ink-mid); margin-bottom: 8px;
+        color: var(--ink-mid); margin-bottom: 8px; font-weight: 500;
     }
     .notes-card.warn .n-text { color: var(--rose); }
+    .notes-card b { color: var(--ink); font-weight: 700; }
 
+    /* STATUS INDICATOR */
     .api-status {
-        font-family: 'Inter'; font-size: 13px; font-weight: 500;
-        padding: 8px 12px; border-radius: 8px; margin-bottom: 12px;
+        font-family: 'Inter'; font-size: 13px; font-weight: 600;
+        padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
+        display: flex; align-items: center; gap: 8px;
     }
-    .api-status.on { background: var(--green-bg); color: var(--green); border: 1px solid #C5D5B3; }
-    .api-status.off { background: var(--rose-bg); color: var(--rose); border: 1px solid #D9A2A2; }
+    .api-status.on { background: var(--green-bg); color: var(--green); border: 1px solid #A8BD8F; }
 
-    .watermark { text-align: center; padding: 3rem 0 1rem; font-family: 'Inter'; font-size: 13px; color: var(--ink-soft); opacity: 0.6; }
+    .watermark {
+        text-align: center; padding: 3rem 0 1rem; font-family: 'Inter';
+        font-size: 13px; color: var(--ink-soft); opacity: 0.7; font-weight: 500;
+    }
     .watermark .h { color: var(--accent-deep); font-size: 14px; }
 
-    .stAlert { border-radius: 12px !important; font-size: 14px !important; }
+    .stAlert {
+        border-radius: 12px !important; font-size: 14px !important;
+        font-weight: 500 !important;
+    }
     hr { border: none !important; border-top: 1px solid var(--border-soft) !important; margin: 1rem 0 !important; }
 
+    /* MOBILE */
     @media (max-width: 768px) {
         .block-container { padding: 1rem 0.75rem 1.5rem !important; }
         .lux-metrics { grid-template-columns: 1fr !important; gap: 10px !important; }
@@ -564,11 +570,14 @@ st.markdown("""
 
 
 def pbadge(p):
-    pal = {"Must have": ("#FAEAE8","#8B2828"),
-           "Considering": ("#EDE6DD","#4A3E33"),
-           "Someday": ("#E6E1F0","#4A3D6B")}
-    bg, fg = pal.get(p, ("#EDE6DD","#4A3E33"))
-    return f'<span class="badge" style="background:{bg};color:{fg};">{p}</span>'
+    """High-contrast, fully visible priority badges."""
+    pal = {
+        "Must have":   ("#F8E5E3", "#7A1F1F", "#C58080"),
+        "Considering": ("#E8DCCB", "#3D2E20", "#B89A7A"),
+        "Someday":     ("#DDD4E8", "#2F2350", "#9F8FB8"),
+    }
+    bg, fg, border = pal.get(p, ("#E8DCCB", "#3D2E20", "#B89A7A"))
+    return f'<span class="badge" style="background:{bg};color:{fg};border-color:{border};">{p}</span>'
 
 
 # =============================================================================
@@ -576,19 +585,7 @@ def pbadge(p):
 # =============================================================================
 with st.sidebar:
     st.markdown("### The atelier")
-
-    has_key = bool(_get_scraper_api_key())
-    if has_key:
-        st.markdown('<div class="api-status on">✓ Premium scraping enabled</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="api-status off">⚠ Premium scraping not configured</div>', unsafe_allow_html=True)
-        with st.expander("How to enable luxury site scraping"):
-            st.markdown("""
-1. Sign up at **scraperapi.com**
-2. Copy your API key
-3. Streamlit Cloud → app Settings → Secrets
-4. Add: `SCRAPER_API_KEY = "your-key"`
-            """)
+    st.markdown('<div class="api-status on">✓ Fast scraping ready</div>', unsafe_allow_html=True)
 
     def _sb(): save_data()
     st.number_input("Wardrobe budget (₹)", min_value=0.0, step=5000.0,
@@ -600,17 +597,11 @@ with st.sidebar:
     if st.button("Auto-fill from link", type="secondary", use_container_width=True):
         url = st.session_state.f_url.strip()
         if not url:
-            st.session_state.fetch_note = "Paste a link above first."
+            st.session_state.fetch_note = "Paste a link first."
         elif not url.startswith(("http://","https://")):
-            st.session_state.fetch_note = "Enter a full URL starting with https://"
+            st.session_state.fetch_note = "URL must start with https://"
         else:
-            mode, _ = _classify_site(url)
-            wait_msg = {
-                "premium": "Reading luxury site (20-45 sec)…",
-                "render": "Reading product page (8-15 sec)…",
-                "simple": "Reading product page (5-10 sec)…",
-            }[mode]
-            with st.spinner(wait_msg):
+            with st.spinner("Reading page…"):
                 res = extract_product_details(url)
             if res["ok"]:
                 if res["title"]: st.session_state.f_name = res["title"]
@@ -620,15 +611,13 @@ with st.sidebar:
                     rate = RATES.get(cur.upper(), 1.0)
                     st.session_state.f_price = round(res["price"] * rate, 2)
                     if cur.upper() != "INR":
-                        st.session_state.fetch_note = f"✓ Converted {cur.upper()} {res['price']:,.0f} → ~{fmt_inr(st.session_state.f_price)}"
+                        st.session_state.fetch_note = f"✓ Got it. {cur} {res['price']:,.0f} ≈ {fmt_inr(st.session_state.f_price)}"
                     else:
-                        st.session_state.fetch_note = "✓ Details found — review below."
+                        st.session_state.fetch_note = "✓ Got it. Review below."
                 else:
-                    st.session_state.fetch_note = "Got name but no price. Enter the price manually."
-            elif res.get("error"):
-                st.session_state.fetch_note = res["error"]
+                    st.session_state.fetch_note = "Got name. Enter price below."
             else:
-                st.session_state.fetch_note = "Could not read this page. Enter details manually."
+                st.session_state.fetch_note = "Couldn't read it. Enter details below."
         st.rerun()
 
     if st.session_state.fetch_note:
@@ -636,8 +625,7 @@ with st.sidebar:
 
     st.text_input("Item name", key="f_name", placeholder="e.g. Ombre Nomade 100ml")
     st.number_input("Price (₹)", min_value=0.0, step=500.0, key="f_price", format="%.0f")
-    st.text_input("Image URL (optional)", key="f_image",
-                   placeholder="Right-click image → Copy image address")
+    st.text_input("Image URL (optional)", key="f_image", placeholder="Paste image link")
     st.selectbox("Priority", PRIORITIES, key="f_priority")
 
     if st.button("Add item", type="primary", use_container_width=True):
@@ -665,8 +653,8 @@ with st.sidebar:
 st.markdown(
     '<div style="text-align:center; margin-bottom:1.5rem;">'
     '<h1 style="font-size:32px; margin:0; font-weight:600;">Luxury Shopping Calculator</h1>'
-    '<p style="font-family:Inter; font-size:13px; font-weight:500; letter-spacing:0.12em; '
-    'text-transform:uppercase; color:#5A4F47; margin-top:6px;">Wardrobe investment planner</p>'
+    '<p style="font-family:Inter; font-size:13px; font-weight:600; letter-spacing:0.12em; '
+    'text-transform:uppercase; color:#4A3F38; margin-top:6px;">Wardrobe investment planner</p>'
     '</div>', unsafe_allow_html=True)
 
 budget = float(st.session_state.total_budget)
