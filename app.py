@@ -10,8 +10,8 @@ import os
 # 0. PAGE CONFIG
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="My Dreamy Wishlist",
-    page_icon="🎀",
+    page_title="Curated Lookbook",
+    page_icon="✦",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -19,7 +19,7 @@ st.set_page_config(
 DATA_FILE = "wishlist_data.json"
 
 # -----------------------------------------------------------------------------
-# 1. PERSISTENCE (saves to a little JSON file so nothing is lost on refresh)
+# 1. PERSISTENCE
 # -----------------------------------------------------------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -45,13 +45,12 @@ def save_data():
                 indent=2,
             )
     except Exception:
-        pass  # never crash the app over a save hiccup
+        pass
 
 
 # -----------------------------------------------------------------------------
-# 2. CURRENCY HELPERS (luxury links are often $/€/£ — convert to ₹ approximately)
+# 2. CURRENCY HELPERS
 # -----------------------------------------------------------------------------
-# Approximate rates -> editable. These are estimates for convenience only.
 APPROX_RATES_TO_INR = {
     "INR": 1.0, "USD": 86.0, "EUR": 93.0, "GBP": 109.0, "AED": 23.0,
     "JPY": 0.57, "CNY": 12.0, "SGD": 64.0, "CAD": 62.0, "AUD": 56.0, "CHF": 98.0,
@@ -59,23 +58,37 @@ APPROX_RATES_TO_INR = {
 CURRENCY_SYMBOLS = {"₹": "INR", "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
 
 
+def fmt_inr(n):
+    """Format number in Indian Rupee style: ₹ 1,00,000"""
+    n = round(abs(n))
+    s = str(n)
+    if len(s) <= 3:
+        return f"₹ {s}"
+    result = s[-3:]
+    s = s[:-3]
+    while len(s) > 2:
+        result = s[-2:] + "," + result
+        s = s[:-2]
+    if s:
+        result = s + "," + result
+    return f"₹ {result}"
+
+
 def parse_amount(raw):
-    """Turn messy price text ('₹1,29,900.00', '$1,299.00', '1.299,00 €') into a float."""
-    s = re.sub(r"[^\d.,]", "", str(raw)).strip(".,")  # drop stray seps from 'Rs.', trailing dots, etc.
+    s = re.sub(r"[^\d.,]", "", str(raw)).strip(".,")
     if not s:
         return None
     if "," in s and "." in s:
-        # whichever separator comes last is the decimal one
         if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")  # European 1.299,00
+            s = s.replace(".", "").replace(",", ".")
         else:
-            s = s.replace(",", "")                    # US/Indian 1,299.00
+            s = s.replace(",", "")
     elif "," in s:
         parts = s.split(",")
         if len(parts) == 2 and len(parts[1]) == 2:
-            s = s.replace(",", ".")  # likely "1299,00" decimal
+            s = s.replace(",", ".")
         else:
-            s = s.replace(",", "")   # thousands separators
+            s = s.replace(",", "")
     try:
         val = float(s)
         return val if val > 0 else None
@@ -95,16 +108,13 @@ def detect_currency(text):
 
 
 # -----------------------------------------------------------------------------
-# 3. SCRAPER — reads structured data first (works on many real stores)
-#    Priority: JSON-LD (schema.org) -> Open Graph / meta -> microdata -> guess
+# 3. SCRAPER
 # -----------------------------------------------------------------------------
 def _walk_jsonld(node, found):
-    """Recursively pull name / image / price / currency out of JSON-LD."""
     if isinstance(node, dict):
         types = node.get("@type", "")
         types = " ".join(types) if isinstance(types, list) else str(types)
         is_product = "product" in types.lower()
-
         if is_product:
             if node.get("name") and not found.get("title"):
                 found["title"] = str(node["name"]).strip()
@@ -116,7 +126,6 @@ def _walk_jsonld(node, found):
                     img = img.get("url")
                 if img:
                     found["image"] = img
-
         offers = node.get("offers")
         if offers:
             for off in (offers if isinstance(offers, list) else [offers]):
@@ -128,7 +137,6 @@ def _walk_jsonld(node, found):
                             found["price"] = parsed
                             if off.get("priceCurrency"):
                                 found["currency"] = off["priceCurrency"]
-
         for v in node.values():
             _walk_jsonld(v, found)
     elif isinstance(node, list):
@@ -151,7 +159,6 @@ def extract_product_details(url):
             return result
         soup = BeautifulSoup(resp.content, "html.parser")
 
-        # --- 1) JSON-LD structured data (the most reliable source) ---
         found = {}
         for script in soup.find_all("script", type="application/ld+json"):
             raw = script.string or script.get_text()
@@ -167,7 +174,6 @@ def extract_product_details(url):
             _walk_jsonld(data, found)
         result.update({k: found[k] for k in ("title", "price", "image", "currency") if found.get(k)})
 
-        # --- 2) Open Graph / standard meta tags ---
         def meta(prop, attr="property"):
             tag = soup.find("meta", {attr: prop})
             return tag.get("content").strip() if tag and tag.get("content") else None
@@ -187,13 +193,11 @@ def extract_product_details(url):
             if cm and not result["currency"]:
                 result["currency"] = cm
 
-        # --- 3) Microdata itemprop="price" ---
         if not result["price"]:
             ip = soup.find(attrs={"itemprop": "price"})
             if ip:
                 result["price"] = parse_amount(ip.get("content") or ip.get_text())
 
-        # --- 4) Last-resort heuristics ---
         if not result["title"]:
             h1 = soup.find("h1")
             if h1:
@@ -223,123 +227,366 @@ if "shopping_list" not in st.session_state:
     st.session_state.shopping_list = items
     st.session_state.total_budget = budget
 
-PRIORITIES = ["Must have 💖", "Wishing 🌸", "Someday 🌙"]
+PRIORITIES = ["Must have", "Considering", "Someday"]
 _defaults = {
     "f_url": "", "f_name": "", "f_price": 0.0, "f_image": "",
-    "f_priority": "Wishing 🌸", "fetch_note": "",
+    "f_priority": "Considering", "fetch_note": "",
     "_clear_form": False, "_just_added": False,
 }
 for k, v in _defaults.items():
     st.session_state.setdefault(k, v)
 
-# Reset the add-form BEFORE any widget is drawn (Streamlit requirement)
 if st.session_state._clear_form:
     st.session_state.f_url = ""
     st.session_state.f_name = ""
     st.session_state.f_price = 0.0
     st.session_state.f_image = ""
-    st.session_state.f_priority = "Wishing 🌸"
+    st.session_state.f_priority = "Considering"
     st.session_state._clear_form = False
 
 # -----------------------------------------------------------------------------
-# 5. CUTE STYLING
+# 5. LUXURY EDITORIAL STYLING
 # -----------------------------------------------------------------------------
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Pacifico&family=Quicksand:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@300;400;500&display=swap');
 
-    :root{
-        --pink:#FF8FB8; --pink-deep:#F25C97; --lav:#C9A6FF; --mint:#62C6A8;
-        --coral:#FF6B8A; --ink:#6B4F5C; --ink-deep:#4A2F3D; --card-shadow:0 10px 30px rgba(255,143,184,.14);
+    :root {
+        --taupe: #4A3F3A;
+        --taupe-light: #6B5E56;
+        --cream: #FDF8F4;
+        --warm-white: #FFFAF7;
+        --blush: #F5E6E0;
+        --blush-border: #E8D5CE;
+        --accent-pink: #D4A0A0;
+        --rose-muted: #C47A7A;
+        --rose-deep: #A85C5C;
     }
 
-    .stApp{
-        background:
-            radial-gradient(1200px 500px at 12% -8%, #FFE6F1 0%, rgba(255,230,241,0) 55%),
-            radial-gradient(1100px 520px at 100% 0%, #EDE4FF 0%, rgba(237,228,255,0) 55%),
-            linear-gradient(160deg,#FFF6FB 0%, #FFF3F8 45%, #F7F1FF 100%);
-        background-attachment:fixed;
+    .stApp {
+        background: linear-gradient(168deg, #FFFAF7 0%, #FDF8F4 40%, #FBF4EF 100%) !important;
     }
-    html, body, [class*="css"]{ font-family:'Quicksand',sans-serif; color:var(--ink); }
-    .block-container{ padding-top:2.2rem; padding-bottom:3rem; max-width:1200px; }
-    footer{ visibility:hidden; }
 
-    h1,h2,h3{ font-family:'Quicksand',sans-serif !important; color:var(--ink-deep) !important; font-weight:700; letter-spacing:.2px; }
-
-    /* ---- Hero wordmark (the signature) ---- */
-    .brand{ text-align:center; margin:0 0 .25rem; }
-    .brand-title{
-        font-family:'Pacifico',cursive; font-size:3.1rem; line-height:1.05;
-        background:linear-gradient(100deg,var(--pink-deep),var(--lav));
-        -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
-        filter:drop-shadow(0 4px 10px rgba(255,143,184,.25));
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, system-ui, sans-serif !important;
+        color: var(--taupe) !important;
     }
-    .brand-sub{ color:var(--ink); font-weight:500; opacity:.8; margin-top:.1rem; }
-    .divider{ text-align:center; color:var(--pink); opacity:.7; letter-spacing:6px; margin:.4rem 0 1.4rem; }
 
-    /* ---- Sidebar ---- */
-    [data-testid="stSidebar"]{
-        background:linear-gradient(180deg,#FFF4F9 0%, #FBF2FF 100%);
-        border-right:1px solid #F6E1EC;
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        max-width: 1100px;
     }
-    [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] p{ color:var(--ink); }
 
-    /* ---- Buttons ---- */
-    .stButton > button{ border-radius:30px; font-weight:600; letter-spacing:.3px; transition:transform .15s ease, box-shadow .2s ease, background .2s ease; }
-    .stButton > button[kind="primary"]{
-        background:linear-gradient(100deg,var(--pink),var(--pink-deep)); color:#fff; border:none;
-        box-shadow:0 8px 18px rgba(242,92,151,.32); padding:.6rem 1rem;
+    footer { visibility: hidden; }
+
+    /* — Typography — */
+    h1, h2, h3 {
+        font-family: 'Playfair Display', Georgia, serif !important;
+        color: var(--taupe) !important;
+        font-weight: 500 !important;
+        letter-spacing: 0.02em;
     }
-    .stButton > button[kind="primary"]:hover{ transform:translateY(-2px); box-shadow:0 12px 24px rgba(242,92,151,.42); }
-    .stButton > button[kind="secondary"]{
-        background:#fff; color:var(--lav); border:1.5px solid #E6D4FF; box-shadow:0 4px 12px rgba(201,166,255,.18);
+
+    /* — Sidebar — */
+    [data-testid="stSidebar"] {
+        background: var(--cream) !important;
+        border-right: 0.5px solid var(--blush-border) !important;
     }
-    .stButton > button[kind="secondary"]:hover{ transform:translateY(-2px); border-color:var(--lav); color:#8A5CF0; }
-
-    /* ---- Inputs ---- */
-    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] > div{
-        border-radius:14px !important; border:1.5px solid #F0DDE8 !important; background:#fff !important;
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        font-family: 'Playfair Display', Georgia, serif !important;
+        color: var(--taupe) !important;
     }
-    .stTextInput input:focus, .stNumberInput input:focus{ border-color:var(--pink) !important; box-shadow:0 0 0 3px rgba(255,143,184,.18) !important; }
-    label, .stSelectbox label, .stNumberInput label, .stTextInput label{ font-weight:600 !important; color:var(--ink-deep) !important; }
-
-    /* ---- Metric cards ---- */
-    .metric-card{
-        background:#fff; border-radius:24px; padding:18px 20px; text-align:center;
-        border-top:4px solid var(--accent); box-shadow:var(--card-shadow); height:100%;
+    [data-testid="stSidebar"] label {
+        font-family: 'Inter', sans-serif !important;
+        font-weight: 400 !important;
+        font-size: 11px !important;
+        letter-spacing: 0.1em !important;
+        text-transform: uppercase !important;
+        color: var(--accent-pink) !important;
     }
-    .metric-emoji{ font-size:1.7rem; }
-    .metric-label{ font-size:.82rem; font-weight:600; letter-spacing:.6px; text-transform:uppercase; opacity:.65; margin-top:.2rem; }
-    .metric-value{ font-size:1.7rem; font-weight:700; color:var(--accent); margin-top:.1rem; }
-
-    /* ---- Budget bar (signature element) ---- */
-    .bar-card{ background:#fff; border-radius:26px; padding:20px 24px; box-shadow:var(--card-shadow); margin:1.1rem 0 .4rem; }
-    .bar-top{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:.55rem; font-weight:600; }
-    .bar-top .pct{ font-family:'Pacifico',cursive; color:var(--pink-deep); font-size:1.2rem; }
-    .bar-wrap{ position:relative; height:22px; border-radius:20px; background:#FCE7F1; overflow:hidden; box-shadow:inset 0 2px 5px rgba(242,92,151,.12); }
-    .bar-fill{ height:100%; border-radius:20px; transition:width .6s cubic-bezier(.2,.8,.2,1); }
-    .bar-note{ margin-top:.55rem; font-size:.9rem; opacity:.8; }
-
-    /* ---- Product cards ---- */
-    div[data-testid="stVerticalBlockBorderWrapper"]{
-        border-radius:22px !important; border:1px solid #F7E3EC !important;
-        background:#fff !important; box-shadow:0 6px 18px rgba(255,143,184,.10) !important;
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] .stCaption {
+        color: var(--taupe-light) !important;
     }
-    .prod-img-box{ width:100%; aspect-ratio:1/1; border-radius:16px; overflow:hidden; background:linear-gradient(135deg,#FFF0F6,#F4ECFF); display:flex; align-items:center; justify-content:center; }
-    .prod-img{ width:100%; height:100%; object-fit:cover; }
-    .prod-img-ph{ font-size:2rem; }
-    .prod-name{ font-weight:700; font-size:1.05rem; color:var(--ink-deep); text-decoration:none; }
-    a.prod-name:hover{ color:var(--pink-deep); text-decoration:underline; }
-    .prod-meta{ margin-top:.35rem; }
-    .prod-source{ font-size:.8rem; opacity:.6; }
-    .prio-badge{ display:inline-block; padding:3px 11px; border-radius:20px; font-size:.74rem; font-weight:700; }
-    .prod-price{ font-family:'Quicksand'; font-weight:700; font-size:1.35rem; color:var(--pink-deep); text-align:right; }
 
-    /* ---- Notes panel ---- */
-    .note-line{ margin-bottom:.5rem; line-height:1.5; }
+    /* — Inputs — */
+    .stTextInput input, .stNumberInput input {
+        border-radius: 10px !important;
+        border: 0.5px solid var(--blush-border) !important;
+        background: white !important;
+        font-family: 'Inter', sans-serif !important;
+        font-size: 13px !important;
+        color: var(--taupe) !important;
+        padding: 10px 14px !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus {
+        border-color: var(--accent-pink) !important;
+        box-shadow: 0 0 0 2px rgba(212, 160, 160, 0.15) !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div {
+        border-radius: 10px !important;
+        border: 0.5px solid var(--blush-border) !important;
+        background: white !important;
+    }
+    label {
+        font-family: 'Inter', sans-serif !important;
+        font-weight: 400 !important;
+        color: var(--taupe-light) !important;
+    }
 
-    @media (prefers-reduced-motion: reduce){
-        .stButton > button, .bar-fill{ transition:none !important; }
+    /* — Buttons — */
+    .stButton > button {
+        border-radius: 10px !important;
+        font-family: 'Playfair Display', serif !important;
+        font-weight: 500 !important;
+        font-size: 14px !important;
+        letter-spacing: 0.03em !important;
+        transition: all 0.2s ease !important;
+        padding: 0.55rem 1.2rem !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: var(--blush) !important;
+        color: var(--taupe) !important;
+        border: 0.5px solid var(--blush-border) !important;
+        box-shadow: none !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: var(--accent-pink) !important;
+        color: white !important;
+        border-color: var(--accent-pink) !important;
+    }
+    .stButton > button[kind="secondary"] {
+        background: transparent !important;
+        color: var(--accent-pink) !important;
+        border: 0.5px solid var(--blush-border) !important;
+    }
+    .stButton > button[kind="secondary"]:hover {
+        background: var(--cream) !important;
+        border-color: var(--accent-pink) !important;
+        color: var(--taupe) !important;
+    }
+
+    /* — Metric cards — */
+    .lux-metric {
+        background: var(--cream);
+        border-radius: 14px;
+        padding: 22px 18px;
+        text-align: center;
+        border: 0.5px solid var(--blush-border);
+    }
+    .lux-metric.warn {
+        background: #FDF0EE;
+        border-color: var(--rose-muted);
+    }
+    .lux-metric-label {
+        font-family: 'Inter', sans-serif;
+        font-size: 11px;
+        font-weight: 400;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent-pink);
+        margin: 0 0 8px;
+    }
+    .lux-metric.warn .lux-metric-label { color: var(--rose-muted); }
+    .lux-metric-value {
+        font-family: 'Playfair Display', serif;
+        font-size: 24px;
+        font-weight: 500;
+        color: var(--taupe);
+        margin: 0;
+    }
+    .lux-metric.warn .lux-metric-value { color: var(--rose-muted); }
+
+    /* — Budget bar — */
+    .budget-bar-wrap {
+        background: var(--cream);
+        border-radius: 14px;
+        padding: 18px 22px;
+        border: 0.5px solid var(--blush-border);
+        margin: 1rem 0 0.5rem;
+    }
+    .budget-bar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 10px;
+    }
+    .budget-bar-header span:first-child {
+        font-family: 'Inter', sans-serif;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent-pink);
+    }
+    .budget-bar-header .pct {
+        font-family: 'Playfair Display', serif;
+        font-size: 16px;
+        color: var(--taupe);
+    }
+    .budget-track {
+        height: 6px;
+        border-radius: 6px;
+        background: var(--blush);
+        overflow: hidden;
+    }
+    .budget-fill {
+        height: 100%;
+        border-radius: 6px;
+        background: var(--accent-pink);
+        transition: width 0.5s ease;
+    }
+    .budget-fill.over { background: var(--rose-muted); }
+    .budget-note {
+        font-family: 'Playfair Display', serif;
+        font-size: 13px;
+        font-style: italic;
+        color: var(--taupe-light);
+        margin-top: 10px;
+    }
+
+    /* — Section labels — */
+    .section-label {
+        font-family: 'Inter', sans-serif;
+        font-size: 11px;
+        font-weight: 400;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent-pink);
+        margin: 0 0 12px;
+    }
+
+    /* — Product cards — */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 14px !important;
+        border: 0.5px solid var(--blush-border) !important;
+        background: var(--cream) !important;
+        box-shadow: none !important;
+    }
+    .prod-img-box {
+        width: 100%;
+        aspect-ratio: 1/1;
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--blush);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .prod-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    .prod-img-ph {
+        font-size: 1.5rem;
+        color: var(--accent-pink);
+    }
+    .prod-name {
+        font-family: 'Playfair Display', serif;
+        font-weight: 500;
+        font-size: 15px;
+        color: var(--taupe);
+        text-decoration: none;
+    }
+    a.prod-name {
+        border-bottom: 0.5px solid var(--blush-border);
+        padding-bottom: 1px;
+    }
+    a.prod-name:hover {
+        color: var(--rose-deep);
+        border-color: var(--rose-deep);
+    }
+    .prod-source {
+        font-family: 'Inter', sans-serif;
+        font-size: 11px;
+        color: var(--accent-pink);
+    }
+    .prio-badge {
+        display: inline-block;
+        padding: 3px 12px;
+        border-radius: 20px;
+        font-family: 'Inter', sans-serif;
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+    }
+    .prod-price {
+        font-family: 'Playfair Display', serif;
+        font-weight: 500;
+        font-size: 18px;
+        color: var(--taupe);
+        text-align: right;
+    }
+
+    /* — Stylist notes — */
+    .stylist-card {
+        background: var(--cream);
+        border-radius: 14px;
+        padding: 20px;
+        border: 0.5px solid var(--blush-border);
+    }
+    .stylist-card.warn {
+        background: #FDF0EE;
+        border-color: var(--rose-muted);
+    }
+    .stylist-text {
+        font-family: 'Playfair Display', serif;
+        font-size: 14px;
+        line-height: 1.7;
+        color: var(--taupe);
+        margin-bottom: 8px;
+    }
+    .stylist-card.warn .stylist-text { color: var(--rose-muted); }
+
+    /* — Dividers & spacing — */
+    hr {
+        border: none !important;
+        border-top: 0.5px solid var(--blush-border) !important;
+        margin: 0.8rem 0 !important;
+    }
+    .stDivider { border-color: var(--blush-border) !important; }
+
+    /* — Header — */
+    .lux-header {
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+    .lux-title {
+        font-family: 'Playfair Display', serif;
+        font-size: 32px;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        color: var(--taupe);
+        margin: 0;
+    }
+    .lux-subtitle {
+        font-family: 'Inter', sans-serif;
+        font-size: 12px;
+        font-weight: 300;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        color: var(--accent-pink);
+        margin-top: 4px;
+    }
+    .lux-divider {
+        text-align: center;
+        color: var(--blush-border);
+        font-size: 10px;
+        letter-spacing: 8px;
+        margin: 8px 0 1.2rem;
+    }
+
+    /* remove streamlit branding clutter */
+    #MainMenu { visibility: hidden; }
+    header[data-testid="stHeader"] { background: transparent !important; }
+    .stDeployButton { display: none !important; }
+
+    @media (prefers-reduced-motion: reduce) {
+        .budget-fill { transition: none !important; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -347,41 +594,41 @@ st.markdown("""
 
 def priority_badge(p):
     palette = {
-        "Must have 💖": ("#FFE3EE", "#D63384"),
-        "Wishing 🌸": ("#F0E3FF", "#7B4FC9"),
-        "Someday 🌙": ("#E3EEFF", "#3D6FD6"),
+        "Must have": ("#FDF0EE", "#A85C5C"),
+        "Considering": ("#F3EDE8", "#6B5E56"),
+        "Someday": ("#EDE8F3", "#7B6B8A"),
     }
-    bg, fg = palette.get(p, ("#F0E3FF", "#7B4FC9"))
+    bg, fg = palette.get(p, ("#F3EDE8", "#6B5E56"))
     return f'<span class="prio-badge" style="background:{bg};color:{fg};">{p}</span>'
 
 
 # -----------------------------------------------------------------------------
-# 6. SIDEBAR — add treasures
+# 6. SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### 🎀 Atelier")
+    st.markdown("### The atelier")
     st.markdown("&nbsp;", unsafe_allow_html=True)
 
     def _save_budget():
         save_data()
 
     st.number_input(
-        "💎 Wardrobe budget (₹)",
+        "Wardrobe budget (₹)",
         min_value=0.0, step=5000.0, key="total_budget",
-        on_change=_save_budget, format="%.2f",
+        on_change=_save_budget, format="%.0f",
     )
 
     st.markdown("---")
-    st.markdown("#### Add a treasure ✨")
+    st.markdown("#### Add to collection")
 
-    st.text_input("Paste a product link", key="f_url", placeholder="https://...")
+    st.text_input("Product link", key="f_url", placeholder="https://...")
 
-    if st.button("✨ Auto-fill from link", type="secondary", use_container_width=True):
+    if st.button("Auto-fill from link", type="secondary", use_container_width=True):
         url = st.session_state.f_url.strip()
         if not url:
-            st.session_state.fetch_note = "Pop a link in first, lovely 🩷"
+            st.session_state.fetch_note = "Paste a link above first."
         else:
-            with st.spinner("Peeking at the page…"):
+            with st.spinner("Reading the page…"):
                 res = extract_product_details(url)
             if res["ok"]:
                 if res["title"]:
@@ -394,36 +641,35 @@ with st.sidebar:
                     st.session_state.f_price = round(res["price"] * rate, 2)
                     if cur.upper() != "INR":
                         st.session_state.fetch_note = (
-                            f"Found {cur.upper()} {res['price']:,.0f} → ≈ ₹{st.session_state.f_price:,.0f} "
-                            f"(approx. rate — do double-check) 🩷"
+                            f"Found {cur.upper()} {res['price']:,.0f} — converted to approx. "
+                            f"{fmt_inr(st.session_state.f_price)}. Verify the rate."
                         )
                     else:
-                        st.session_state.fetch_note = "Found it! Have a peek below and tweak away 🩷"
+                        st.session_state.fetch_note = "Details found. Review below and adjust if needed."
                 else:
-                    st.session_state.fetch_note = "Got the name but not the price — just type it in 🤍"
+                    st.session_state.fetch_note = "Name found, but not the price — enter it manually."
             else:
                 st.session_state.fetch_note = (
-                    "This boutique keeps its doors locked to robots 🔒 — "
-                    "no worries, add the details by hand below 🤍"
+                    "This site blocked automatic reading. Enter the details manually below."
                 )
         st.rerun()
 
     if st.session_state.fetch_note:
         st.caption(st.session_state.fetch_note)
 
-    st.text_input("Item name", key="f_name", placeholder="Quilted leather bag")
-    st.number_input("Price (₹)", min_value=0.0, step=500.0, key="f_price", format="%.2f")
-    st.selectbox("How badly do we want it?", PRIORITIES, key="f_priority")
+    st.text_input("Item name", key="f_name", placeholder="Prada Re-Edition 2005")
+    st.number_input("Price (₹)", min_value=0.0, step=500.0, key="f_price", format="%.0f")
+    st.selectbox("Priority", PRIORITIES, key="f_priority")
 
-    if st.button("💕 Add to wishlist", type="primary", use_container_width=True):
+    if st.button("Add item", type="primary", use_container_width=True):
         if st.session_state.f_name.strip() and st.session_state.f_price > 0:
             url = st.session_state.f_url.strip()
-            domain = urlparse(url).netloc.replace("www.", "") if url else "Hand-picked"
+            domain = urlparse(url).netloc.replace("www.", "") if url else "Manual entry"
             st.session_state.shopping_list.append({
                 "name": st.session_state.f_name.strip(),
                 "price": float(st.session_state.f_price),
                 "url": url if url else "#",
-                "source": domain or "Hand-picked",
+                "source": domain or "Manual entry",
                 "image": st.session_state.f_image,
                 "priority": st.session_state.f_priority,
             })
@@ -433,7 +679,7 @@ with st.sidebar:
             st.session_state.fetch_note = ""
             st.rerun()
         else:
-            st.warning("A name and a price, please 💗")
+            st.warning("Please enter both a name and a price.")
 
 # -----------------------------------------------------------------------------
 # 7. HEADER
@@ -443,14 +689,16 @@ if st.session_state._just_added:
     st.session_state._just_added = False
 
 st.markdown(
-    "<div class='brand'><div class='brand-title'>My Dreamy Wishlist</div>"
-    "<div class='brand-sub'>a soft little place to dream, plan, and treat yourself ✨</div></div>",
+    '<div class="lux-header">'
+    '<div class="lux-title">Curated Lookbook</div>'
+    '<div class="lux-subtitle">Luxury wardrobe planner</div>'
+    '</div>',
     unsafe_allow_html=True,
 )
-st.markdown("<div class='divider'>✿ ❀ ✿</div>", unsafe_allow_html=True)
+st.markdown('<div class="lux-divider">— ✦ —</div>', unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 8. BUDGET SUMMARY + SIGNATURE BAR
+# 8. BUDGET SUMMARY
 # -----------------------------------------------------------------------------
 budget = float(st.session_state.total_budget)
 total_spent = sum(item["price"] for item in st.session_state.shopping_list)
@@ -459,37 +707,52 @@ over = remaining < 0
 
 c1, c2, c3 = st.columns(3)
 c1.markdown(
-    f"<div class='metric-card' style='--accent:var(--lav);'><div class='metric-emoji'>💰</div>"
-    f"<div class='metric-label'>Budget</div><div class='metric-value'>₹{budget:,.0f}</div></div>",
+    f'<div class="lux-metric">'
+    f'<p class="lux-metric-label">Total allowance</p>'
+    f'<p class="lux-metric-value">{fmt_inr(budget)}</p>'
+    f'</div>',
     unsafe_allow_html=True,
 )
 c2.markdown(
-    f"<div class='metric-card' style='--accent:var(--pink);'><div class='metric-emoji'>🛍️</div>"
-    f"<div class='metric-label'>Dreamed up</div><div class='metric-value'>₹{total_spent:,.0f}</div></div>",
+    f'<div class="lux-metric">'
+    f'<p class="lux-metric-label">Allocated funds</p>'
+    f'<p class="lux-metric-value">{fmt_inr(total_spent)}</p>'
+    f'</div>',
     unsafe_allow_html=True,
 )
 if over:
     c3.markdown(
-        f"<div class='metric-card' style='--accent:var(--coral);'><div class='metric-emoji'>🙈</div>"
-        f"<div class='metric-label'>Over by</div><div class='metric-value'>₹{abs(remaining):,.0f}</div></div>",
+        f'<div class="lux-metric warn">'
+        f'<p class="lux-metric-label">Over budget</p>'
+        f'<p class="lux-metric-value">{fmt_inr(abs(remaining))}</p>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 else:
     c3.markdown(
-        f"<div class='metric-card' style='--accent:var(--mint);'><div class='metric-emoji'>💝</div>"
-        f"<div class='metric-label'>Still to play with</div><div class='metric-value'>₹{remaining:,.0f}</div></div>",
+        f'<div class="lux-metric">'
+        f'<p class="lux-metric-label">Available balance</p>'
+        f'<p class="lux-metric-value">{fmt_inr(remaining)}</p>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
+# Budget bar
 pct = min(total_spent / budget, 1.0) if budget > 0 else 0.0
-fill = ("linear-gradient(90deg,#FF8FB8,#FF6B8A)" if over
-        else "linear-gradient(90deg,#FFB3D1,#C9A6FF)")
-emoji = "🙈" if over else ("🌷" if pct > 0.85 else "💕")
+fill_cls = "over" if over else ""
 st.markdown(
-    f"<div class='bar-card'><div class='bar-top'><span>Budget glow-meter</span>"
-    f"<span class='pct'>{pct*100:.0f}%</span></div>"
-    f"<div class='bar-wrap'><div class='bar-fill' style='width:{pct*100:.1f}%;background:{fill};'></div></div>"
-    f"<div class='bar-note'>{'A touch over for now ' + emoji + ' — maybe pause one piece.' if over else 'You are doing beautifully ' + emoji}</div></div>",
+    f'<div class="budget-bar-wrap">'
+    f'<div class="budget-bar-header">'
+    f'<span>Allocation</span>'
+    f'<span class="pct">{pct * 100:.0f}%</span>'
+    f'</div>'
+    f'<div class="budget-track">'
+    f'<div class="budget-fill {fill_cls}" style="width:{pct * 100:.1f}%;"></div>'
+    f'</div>'
+    f'<div class="budget-note">'
+    f'{"Over the limit — consider removing a piece." if over else "Your curation is on track."}'
+    f'</div>'
+    f'</div>',
     unsafe_allow_html=True,
 )
 
@@ -502,11 +765,13 @@ col_items, col_notes = st.columns([2, 1])
 
 with col_items:
     count = len(st.session_state.shopping_list)
-    st.markdown(f"### 🛍️ Your collection &nbsp;<span style='font-size:.9rem;opacity:.6;'>"
-                f"{count} treasure{'s' if count != 1 else ''}</span>", unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="section-label">The wardrobe — {count} piece{"s" if count != 1 else ""}</p>',
+        unsafe_allow_html=True,
+    )
 
     if not st.session_state.shopping_list:
-        st.info("Your wishlist is a blank page right now — add your first treasure from the left 🎀")
+        st.info("Your collection is empty. Add your first piece from the sidebar.")
     else:
         for index, item in enumerate(st.session_state.shopping_list):
             with st.container(border=True):
@@ -514,58 +779,78 @@ with col_items:
                 with ci:
                     if item.get("image"):
                         st.markdown(
-                            f"<div class='prod-img-box'><img class='prod-img' src='{item['image']}' "
-                            f"onerror=\"this.style.display='none'\"/></div>",
+                            f'<div class="prod-img-box"><img class="prod-img" src=\'{item["image"]}\' '
+                            f'onerror="this.style.display=\'none\'"/></div>',
                             unsafe_allow_html=True,
                         )
                     else:
-                        st.markdown("<div class='prod-img-box'><span class='prod-img-ph'>🎁</span></div>",
-                                    unsafe_allow_html=True)
+                        st.markdown(
+                            '<div class="prod-img-box"><span class="prod-img-ph">✦</span></div>',
+                            unsafe_allow_html=True,
+                        )
                 with cn:
                     if item["url"] != "#":
-                        st.markdown(f"<a class='prod-name' href='{item['url']}' target='_blank'>{item['name']}</a>",
-                                    unsafe_allow_html=True)
+                        st.markdown(
+                            f'<a class="prod-name" href="{item["url"]}" target="_blank">{item["name"]}</a>',
+                            unsafe_allow_html=True,
+                        )
                     else:
-                        st.markdown(f"<span class='prod-name'>{item['name']}</span>", unsafe_allow_html=True)
+                        st.markdown(
+                            f'<span class="prod-name">{item["name"]}</span>',
+                            unsafe_allow_html=True,
+                        )
                     st.markdown(
-                        f"<div class='prod-meta'>{priority_badge(item.get('priority','Wishing 🌸'))}"
-                        f"<span class='prod-source'> · {item['source']}</span></div>",
+                        f'<div style="margin-top:6px;">{priority_badge(item.get("priority", "Considering"))}'
+                        f'<span class="prod-source"> · {item["source"]}</span></div>',
                         unsafe_allow_html=True,
                     )
                 with cp:
-                    st.markdown(f"<div class='prod-price'>₹{item['price']:,.0f}</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="prod-price">{fmt_inr(item["price"])}</div>',
+                        unsafe_allow_html=True,
+                    )
                     if st.button("Remove", key=f"del_{index}", use_container_width=True):
                         st.session_state.shopping_list.pop(index)
                         save_data()
                         st.rerun()
 
 with col_notes:
-    st.markdown("### 💌 Stylist notes")
-    with st.container(border=True):
-        if not st.session_state.shopping_list:
-            st.markdown("<div class='note-line'>Add a few pieces and I'll whisper little budgeting "
-                        "thoughts here 🌸</div>", unsafe_allow_html=True)
+    st.markdown('<p class="section-label">Stylist notes</p>', unsafe_allow_html=True)
+
+    if not st.session_state.shopping_list:
+        st.markdown(
+            '<div class="stylist-card">'
+            '<p class="stylist-text">Add a few pieces and insights will appear here.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        dearest = max(st.session_state.shopping_list, key=lambda x: x["price"])
+        avg = total_spent / count
+        warn_cls = "warn" if over else ""
+
+        notes_html = f'<div class="stylist-card {warn_cls}">'
+        if over:
+            notes_html += (
+                f'<p class="stylist-text">You are over budget by <b>{fmt_inr(abs(remaining))}</b>.</p>'
+                f'<p class="stylist-text">Consider pausing on the <b>{dearest["name"]}</b> '
+                f'({fmt_inr(dearest["price"])}) to rebalance your wardrobe.</p>'
+            )
+        elif pct > 0.85:
+            notes_html += (
+                f'<p class="stylist-text">Nearly at capacity — <b>{fmt_inr(remaining)}</b> remaining.</p>'
+                f'<p class="stylist-text">Consider holding off on the next addition.</p>'
+            )
         else:
-            dearest = max(st.session_state.shopping_list, key=lambda x: x["price"])
-            avg = total_spent / count
-            if over:
-                st.markdown(f"<div class='note-line'>We're <b>₹{abs(remaining):,.0f}</b> past the budget — "
-                            f"so close, though! 🙈</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='note-line'>Pausing on the <b>{dearest['name']}</b> "
-                            f"(₹{dearest['price']:,.0f}) would bring it right back into balance.</div>",
-                            unsafe_allow_html=True)
-            elif pct > 0.85:
-                st.markdown(f"<div class='note-line'>Almost at the top of the budget — "
-                            f"<b>₹{remaining:,.0f}</b> left to play with. 🌷</div>", unsafe_allow_html=True)
-                st.markdown("<div class='note-line'>Maybe save the next find for payday? 💭</div>",
-                            unsafe_allow_html=True)
-            else:
-                st.markdown("<div class='note-line'>✨ Beautifully balanced — everything sits comfortably "
-                            "inside your budget.</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='note-line'>Still <b>₹{remaining:,.0f}</b> of room if something "
-                            f"catches your eye. 💕</div>", unsafe_allow_html=True)
-            st.markdown("<hr style='border:none;border-top:1px solid #F6E1EC;margin:.6rem 0;'>",
-                        unsafe_allow_html=True)
-            st.markdown(f"<div class='note-line' style='opacity:.75;font-size:.9rem;'>"
-                        f"💗 Most-wanted: <b>{dearest['name']}</b><br>"
-                        f"🫧 Average piece: <b>₹{avg:,.0f}</b></div>", unsafe_allow_html=True)
+            notes_html += (
+                f'<p class="stylist-text">Your curation is perfectly balanced.</p>'
+                f'<p class="stylist-text">You have <b>{fmt_inr(remaining)}</b> of room remaining.</p>'
+            )
+        notes_html += '<hr>'
+        notes_html += (
+            f'<p class="stylist-text" style="font-size:13px; color: var(--taupe-light);">'
+            f'Statement piece: <b>{dearest["name"]}</b><br>'
+            f'Average per item: <b>{fmt_inr(avg)}</b></p>'
+        )
+        notes_html += '</div>'
+        st.markdown(notes_html, unsafe_allow_html=True)
