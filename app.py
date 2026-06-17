@@ -2,166 +2,182 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+import re
 
 # -----------------------------------------------------------------------------
-# 1. CORE CODE CONFIGURATION & INITIALIZATION
+# 1. PROFESSIONAL UI CONFIGURATION
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Smart Budget Shopper Dashboard", layout="wide")
+st.set_page_config(page_title="Smart Budget Shopper", page_icon="🛍️", layout="wide", initial_sidebar_state="expanded")
 
-# Initialize session state to remember items across webpage updates
+# Initialize session state memory
 if "shopping_list" not in st.session_state:
     st.session_state.shopping_list = []
 if "total_budget" not in st.session_state:
-    st.session_state.total_budget = 0.0
+    st.session_state.total_budget = 50000.0  # Default 50k INR
 
 # -----------------------------------------------------------------------------
-# 2. BACKEND LOGIC: PRICE EXTRACTION ENGINE
+# 2. UPGRADED STEALTH SCRAPER (INDIAN E-COMMERCE FOCUS)
 # -----------------------------------------------------------------------------
 def extract_product_details(url):
-    """
-    Attempts to scrape the product name and price from a given URL.
-    Includes browser headers to prevent basic bot blocks.
-    """
+    """Upgraded scraper with stealth headers to bypass basic bot protection."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/"
     }
     
     try:
-        domain = urlparse(url).netloc
-        response = requests.get(url, headers=headers, timeout=10)
-        
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
             return None, None
             
         soup = BeautifulSoup(response.content, "html.parser")
         
-        # Generic parsing logic (Can be customized for specific domains)
-        title = "Scraped Product"
-        if soup.find("h1"):
-            title = soup.find("h1").get_text().strip()
-        elif soup.find("span", {"id": "productTitle"}): # Amazon fallback
-            title = soup.find("span", {"id": "productTitle"}).get_text().strip()
-            
-        # Common price container elements across different e-commerce scripts
-        price_selectors = [
-            {"tag": "span", "class": "a-price-whole"},
-            {"tag": "span", "class": "price-to-pay"},
-            {"tag": "div", "class": "_30jeq3 _16Jk6d"}, # Flipkart fallback
-            {"tag": "span", "class": "regular-price"}
+        # 1. Fetch Title
+        title = "Unknown Product"
+        title_tags = [
+            soup.find("span", {"id": "productTitle"}), # Amazon
+            soup.find("span", class_="B_NuCI"), # Old Flipkart
+            soup.find("span", class_="VU-ZEz"), # New Flipkart
+            soup.find("h1", class_="pdp-title"), # Myntra
+            soup.find("h1") # Generic
+        ]
+        for tag in title_tags:
+            if tag:
+                title = tag.get_text().strip()
+                break
+                
+        # 2. Fetch Price (INR Focus)
+        price = None
+        price_tags = [
+            soup.find("span", class_="a-price-whole"), # Amazon
+            soup.find("div", class_="_30jeq3 _16Jk6d"), # Old Flipkart
+            soup.find("div", class_="Nx9bqj CxhGGd"), # New Flipkart
+            soup.find("span", class_="pdp-price"), # Myntra
+            soup.find("span", class_="price") # Generic
         ]
         
-        price = None
-        for selector in price_selectors:
-            element = soup.find(selector["tag"], class_=selector["class"])
-            if element:
-                raw_price = element.get_text().strip()
-                # Extract numeric digits and decimals
-                cleaned_price = "".join(c for c in raw_price if c.isdigit() or c == '.')
+        for tag in price_tags:
+            if tag:
+                raw_price = tag.get_text().strip()
+                # Strip commas and ₹ signs, keep digits
+                cleaned_price = re.sub(r'[^\d.]', '', raw_price)
                 if cleaned_price:
                     price = float(cleaned_price)
                     break
                     
-        return title[:50] + "..." if len(title) > 50 else title, price
+        return title[:65] + "..." if len(title) > 65 else title, price
         
     except Exception:
         return None, None
 
 # -----------------------------------------------------------------------------
-# 3. FRONTEND USER INTERFACE & METRICS
+# 3. SIDEBAR: CONTROL PANEL
 # -----------------------------------------------------------------------------
-st.title("🛍️ Smart Budget Shopper Dashboard")
-st.markdown("Plan your purchases, track link expenses, and evaluate visual recommendations.")
+with st.sidebar:
+    st.title("⚙️ Control Panel")
+    st.markdown("---")
+    
+    # Budget Input
+    st.session_state.total_budget = st.number_input(
+        "💰 Set Total Budget (₹)", 
+        min_value=0.0, 
+        value=float(st.session_state.total_budget), 
+        step=1000.0
+    )
+    
+    st.markdown("---")
+    st.subheader("➕ Add Product")
+    
+    with st.form("add_product_form", clear_on_submit=True):
+        product_url = st.text_input("🔗 Paste Link Here (Amazon, Flipkart, etc.):")
+        
+        with st.expander("🛠️ Manual Override (If Link Fails)"):
+            st.info("E-commerce sites sometimes block automated fetching. Type it manually here if the link fails.")
+            manual_name = st.text_input("Product Name:")
+            manual_price = st.number_input("Price (₹):", min_value=0.0, step=100.0)
+            
+        submitted = st.form_submit_button("Fetch & Add to Dashboard", use_container_width=True)
+        
+        if submitted:
+            if product_url or manual_name:
+                with st.spinner("Fetching data from website..."):
+                    scraped_name, scraped_price = extract_product_details(product_url) if product_url else (None, None)
+                    
+                    final_name = manual_name if manual_name else (scraped_name if scraped_name else "Scraping Blocked - Please enter manually")
+                    final_price = manual_price if manual_price > 0 else (scraped_price if scraped_price else 0.0)
+                    
+                    domain = urlparse(product_url).netloc.replace("www.", "") if product_url else "Manual Entry"
+                    
+                    st.session_state.shopping_list.append({
+                        "name": final_name,
+                        "price": final_price,
+                        "url": product_url if product_url else "#",
+                        "source": domain
+                    })
+                    st.rerun()
+            else:
+                st.error("Please provide a URL or manual details.")
 
-# Top Configuration Bar
-col_b1, col_b2 = st.columns([1, 2])
-with col_b1:
-    input_budget = st.number_input("Set Your Total Budget:", min_value=0.0, value=st.session_state.total_budget, step=100.0)
-    st.session_state.total_budget = input_budget
+# -----------------------------------------------------------------------------
+# 4. MAIN DASHBOARD: UI / UX
+# -----------------------------------------------------------------------------
+st.title("🛍️ Smart Budget Dashboard")
+st.markdown("Track your wishlist and manage your finances seamlessly.")
 
-# Calculations Setup
+# Financial Calculations
 total_spent = sum(item["price"] for item in st.session_state.shopping_list)
 remaining_budget = st.session_state.total_budget - total_spent
 
-# Main Metrics Dashboard
-m_col1, m_col2, m_col3 = st.columns(3)
-m_col1.metric("Total Budget", f"${st.session_state.total_budget:,.2f}")
-m_col2.metric("Total Cost", f"${total_spent:,.2f}")
-
-if remaining_budget >= 0:
-    m_col3.metric("Remaining Balance", f"${remaining_budget:,.2f}")
-else:
-    m_col3.metric("Over Budget By", f"${abs(remaining_budget):,.2f}", delta_color="inverse")
+# High-End Metric Cards
+m1, m2, m3 = st.columns(3)
+with m1:
+    st.info(f"**Total Budget**\n### ₹ {st.session_state.total_budget:,.2f}")
+with m2:
+    st.warning(f"**Total Cost**\n### ₹ {total_spent:,.2f}")
+with m3:
+    if remaining_budget >= 0:
+        st.success(f"**Remaining Balance**\n### ₹ {remaining_budget:,.2f}")
+    else:
+        st.error(f"**Over Budget By**\n### ₹ {abs(remaining_budget):,.2f}")
 
 st.markdown("---")
 
-# Layout Split: Inputs vs List View
-left_panel, right_panel = st.columns([1, 1])
+# -----------------------------------------------------------------------------
+# 5. PRODUCT LIST & SUGGESTIONS
+# -----------------------------------------------------------------------------
+col_items, col_sugg = st.columns([2, 1])
 
-with left_panel:
-    st.subheader("Add New Product Link")
-    product_url = st.text_input("Paste Product URL here:")
-    
-    # Optional Manual Overrides if sites deploy anti-scraping firewalls
-    manual_name = st.text_input("Custom Name (Optional / Override):")
-    manual_price = st.number_input("Custom Price (Optional / Override):", min_value=0.0, step=10.0)
-    
-    if st.button("Process & Add to Dashboard"):
-        if product_url:
-            with st.spinner("Analyzing web link data..."):
-                scraped_name, scraped_price = extract_product_details(product_url)
-                
-                # Assign values prioritising manual fields over scraper outputs
-                final_name = manual_name if manual_name else (scraped_name if scraped_name else "Manual Link Entry")
-                final_price = manual_price if manual_price > 0 else (scraped_price if scraped_price else 0.0)
-                
-                # Fetch base domain name for visual layout
-                parsed_uri = urlparse(product_url)
-                source_domain = parsed_uri.netloc.replace("www.", "")
-                
-                st.session_state.shopping_list.append({
-                    "name": final_name,
-                    "price": final_price,
-                    "url": product_url,
-                    "source": source_domain
-                })
-                st.rerun()
-        else:
-            st.error("Please insert a valid web address first.")
-
-with right_panel:
-    st.subheader("Your Purchase Breakdown")
+with col_items:
+    st.subheader("🛒 Your Shopping List")
     if not st.session_state.shopping_list:
-        st.info("No items added yet. Paste a product link on the left to start calculations.")
+        st.caption("Your list is empty. Add items from the sidebar to begin!")
     else:
         for index, item in enumerate(st.session_state.shopping_list):
-            item_row = st.container()
-            r_col1, r_col2, r_col3 = item_row.columns([3, 1, 1])
-            r_col1.markdown(f"**[{item['name']}]({item['url']})** \n*Source: {item['source']}*")
-            r_col2.markdown(f"**${item['price']:,.2f}**")
-            if r_col3.button("Remove", key=f"del_{index}"):
-                st.session_state.shopping_list.pop(index)
-                st.rerun()
+            # Professional Card UI for each item
+            with st.container(border=True):
+                r1, r2, r3 = st.columns([4, 2, 1])
+                with r1:
+                    st.markdown(f"**[{item['name']}]({item['url']})**")
+                    st.caption(f"Source: {item['source']}")
+                with r2:
+                    st.subheader(f"₹ {item['price']:,.2f}")
+                with r3:
+                    if st.button("🗑️ Remove", key=f"del_{index}"):
+                        st.session_state.shopping_list.pop(index)
+                        st.rerun()
 
-# -----------------------------------------------------------------------------
-# 4. BACKEND SUGGESTIONS ENGINE
-# -----------------------------------------------------------------------------
-st.markdown("---")
-st.subheader("💡 Automated Optimization Suggestions")
-
-if remaining_budget < 0:
-    excess = abs(remaining_budget)
-    st.warning(f"Your selection path exceeds your set ceiling limit by **${excess:,.2f}**.")
-    
-    # Suggestion 1: Find the single most expensive item
-    expensive_item = max(st.session_state.shopping_list, key=lambda x: x["price"])
-    st.markdown(f"• **Budget Saver Action:** Removing your highest expense item (**{expensive_item['name']}** - ${expensive_item['price']:,.2f}) will immediately clean up your deficit.")
-    
-    # Suggestion 2: Find a single item that resolves the exact deficit if removed
-    viable_drops = [i for i in st.session_state.shopping_list if i["price"] >= excess]
-    if viable_drops:
-        closest_drop = min(viable_drops, key=lambda x: x["price"])
-        st.markdown(f"• **Precision Alternative:** Swapping out or eliminating just **{closest_drop['name']}** (${closest_drop['price']:,.2f}) saves enough to bring the entire pipeline back into standard parameters.")
-else:
-    if st.session_state.shopping_list:
-        st.success("Excellent! Your current shopping layout is healthy and falls squarely within financial constraints.")
+with col_sugg:
+    st.subheader("💡 Smart AI Insights")
+    with st.container(border=True):
+        if not st.session_state.shopping_list:
+            st.write("Awaiting data to provide insights...")
+        elif remaining_budget < 0:
+            excess = abs(remaining_budget)
+            st.error(f"**Action Required!** You are ₹{excess:,.2f} over budget.")
+            expensive_item = max(st.session_state.shopping_list, key=lambda x: x["price"])
+            st.markdown(f"📉 **Quick Fix:** Removing your most expensive item (**{expensive_item['name']}** at ₹{expensive_item['price']:,.2f}) will bring you back into the green.")
+        else:
+            st.success("✅ **Budget is Healthy!** You are well within your limits.")
+            st.markdown(f"You still have **₹{remaining_budget:,.2f}** available to allocate.")
